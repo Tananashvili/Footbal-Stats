@@ -1,0 +1,470 @@
+from __future__ import annotations
+
+import os
+import re
+import json
+from datetime import datetime, time
+from pathlib import Path
+
+import pandas as pd
+import requests
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
+EXCEL_PATH = Path("stats_averages.xlsx")
+SHEET_NAME = "summary"
+DEFAULT_THRESHOLD_PCT = 20.0
+MATCHES_PATH = Path("json") / "crocobet_event_matches.json"
+EVENT_API_TEMPLATE = "https://api.crocobet.com/rest/market/events/{event_id}"
+
+STAT_ORDER = [
+    "corners",
+    "cards",
+    "shots_on_target",
+    "total_shots",
+    "fouls",
+    "goalkeeper_saves",
+    "throw_ins",
+    "offsides",
+]
+
+STAT_LABELS = {
+    "corners": "Corners",
+    "cards": "Cards",
+    "shots_on_target": "Shots on target",
+    "total_shots": "Total shots",
+    "fouls": "Fouls",
+    "goalkeeper_saves": "Goalkeeper saves",
+    "throw_ins": "Throw-ins",
+    "offsides": "Offsides",
+}
+
+
+BASE_SITE = "https://www.statshub.com"
+STATSHUB_KEY_MAP = {
+    "corners": "cornerKicks",
+    "cards": "cards",
+    "shots_on_target": "shotsOnGoal",
+    "total_shots": "totalShotsOnGoal",
+    "fouls": "fouls",
+    "goalkeeper_saves": "goalkeeperSaves",
+    "throw_ins": "throwIns",
+    "offsides": "offsides",
+}
+CB_MARKET_PHRASES = {
+    "corners": ["corner"],
+    "cards": ["card"],
+    "shots_on_target": ["shots on target"],
+    "total_shots": ["shots"],
+    "fouls": ["foul"],
+    "goalkeeper_saves": ["save"],
+    "throw_ins": ["throw-in", "throw in", "throwins"],
+    "offsides": ["offside"],
+}
+CB_EXCLUDE_TERMS = ["team", "half"]
+CB_EXCLUDE_PHRASES = {
+    "total_shots": ["shots on target"],
+}
+
+
+def format_number(value: float) -> str:
+    num = float(value)
+    text = f"{num:.2f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def diff_percent(sh_value: float, cb_value: float) -> float | None:
+    if sh_value is None or cb_value is None:
+        return None
+    try:
+        sh = float(sh_value)
+        cb = float(cb_value)
+    except (TypeError, ValueError):
+        return None
+    denom = (abs(sh) + abs(cb)) / 2
+    if denom == 0:
+        return None
+    return abs(cb - sh) / denom * 100
+
+
+def send_telegram_message(token: str, chat_id: str, text: str) -> None:
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    resp = requests.post(url, json=payload, timeout=30)
+    resp.raise_for_status()
+
+
+def normalize(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
+def parse_odds(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_json_file(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return []
+    return payload if isinstance(payload, list) else []
+
+
+def build_event_id_map(records: list[dict]) -> dict[str, int]:
+    out = {}
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        matchup = rec.get("matchup")
+        event_id = rec.get("event_id")
+        if not isinstance(matchup, str) or event_id is None:
+            continue
+        try:
+            out[normalize(matchup)] = int(event_id)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def fetch_crocobet_event(event_id: int) -> dict | None:
+    url = EVENT_API_TEMPLATE.format(event_id=event_id)
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json,text/plain,*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Request-Language": "en",
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+    except requests.RequestException:
+        return None
+    data = resp.json()
+    return data if isinstance(data, dict) else None
+
+
+def list_event_games(event_data: dict | None) -> list[dict]:
+    if not isinstance(event_data, dict):
+        return []
+    data = event_data.get("data")
+    if not isinstance(data, dict):
+        return []
+    event_games = data.get("eventGames")
+    return event_games if isinstance(event_games, list) else []
+
+
+def is_valid_cb_market(game_name: str, label: str) -> bool:
+    name = (game_name or "").lower()
+    if any(t in name for t in CB_EXCLUDE_TERMS):
+        return False
+    phrases = CB_MARKET_PHRASES.get(label, [])
+    if phrases and not any(p in name for p in phrases):
+        return False
+    for phrase in CB_EXCLUDE_PHRASES.get(label, []):
+        if phrase in name:
+            return False
+    return True
+
+
+def find_under_over(outcomes: list[dict]) -> tuple[dict | None, dict | None]:
+    under = None
+    over = None
+    for outcome in outcomes:
+        if not isinstance(outcome, dict):
+            continue
+        name = str(outcome.get("outcomeName") or "").strip().lower()
+        if name.startswith("under"):
+            under = outcome
+        elif name.startswith("over"):
+            over = outcome
+    return under, over
+
+
+def get_cb_side_odd_for_line(
+    event_data: dict | None,
+    label: str,
+    cb_line: float,
+    side: str,
+) -> float | None:
+    best_odd = None
+    best_delta = None
+    for game in list_event_games(event_data):
+        if not isinstance(game, dict):
+            continue
+        game_name = str(game.get("gameName") or "")
+        if not is_valid_cb_market(game_name, label):
+            continue
+        argument = parse_float(game.get("argument"))
+        if argument is None:
+            continue
+        under, over = find_under_over(game.get("outcomes", []))
+        if not under or not over:
+            continue
+        odd = parse_odds((over if side == "over" else under).get("outcomeOdds"))
+        if odd is None:
+            continue
+        delta = abs(argument - cb_line)
+        if best_delta is None or delta < best_delta:
+            best_delta = delta
+            best_odd = odd
+    if best_delta is None:
+        return None
+    return best_odd
+
+
+def fetch_games_today() -> list[dict]:
+    today = datetime.now().date()
+    start_dt = datetime.combine(today, time.min)
+    end_dt = datetime.combine(today, time.max)
+    params = {
+        "startOfDay": int(start_dt.timestamp()),
+        "endOfDay": int(end_dt.timestamp()),
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": BASE_SITE + "/",
+    }
+    url = f"{BASE_SITE}/api/event/by-date"
+    resp = requests.get(url, params=params, headers=headers, timeout=30)
+    resp.raise_for_status()
+    payload = resp.json()
+    data = payload.get("data", []) if isinstance(payload, dict) else []
+    return data if isinstance(data, list) else []
+
+
+def build_matchup_context(games: list[dict]) -> dict[str, dict]:
+    ctx = {}
+    for game in games:
+        try:
+            home = game["homeTeam"]
+            away = game["awayTeam"]
+            tournaments = game["tournaments"]
+        except (TypeError, KeyError):
+            continue
+        matchup = f"{home.get('name', '')} - {away.get('name', '')}".strip()
+        key = normalize(matchup)
+        if not key:
+            continue
+        ctx[key] = {
+            "home_team_id": home.get("id"),
+            "away_team_id": away.get("id"),
+            "tournament_id": tournaments.get("uniqueTournamentId"),
+            "home_name": home.get("name"),
+            "away_name": away.get("name"),
+        }
+    return ctx
+
+
+def fetch_team_history(team_id: int, tournament_id: int) -> dict | None:
+    url = f"{BASE_SITE}/api/team/{team_id}/performance?"
+    params = {
+        "tournamentId": tournament_id,
+        "limit": 10,
+        "location": "all",
+        "eventHalf": "ALL",
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": BASE_SITE + "/",
+    }
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=30)
+        resp.raise_for_status()
+    except requests.RequestException:
+        return None
+    data = resp.json()
+    return data if isinstance(data, dict) else None
+
+
+def parse_float(value) -> float | None:
+    try:
+        if value is None or pd.isna(value):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def infer_bet_side(sh_value: float, cb_line: float) -> str | None:
+    if sh_value > cb_line:
+        return "over"
+    if sh_value < cb_line:
+        return "under"
+    return None
+
+
+def count_hits(history_data: dict | None, stat_key: str, side: str, line_value: float) -> tuple[int, int]:
+    if not history_data:
+        return 0, 0
+    matches = history_data.get("data", [])
+    if not isinstance(matches, list):
+        return 0, 0
+
+    hits = 0
+    total = 0
+    for match in matches:
+        stats = match.get("statistics") if isinstance(match, dict) else None
+        opp_stats = match.get("opponentStatistics") if isinstance(match, dict) else None
+        if not isinstance(stats, dict) or not isinstance(opp_stats, dict):
+            continue
+        if stat_key not in stats or stat_key not in opp_stats:
+            continue
+        total_value = parse_float(stats.get(stat_key))
+        opp_value = parse_float(opp_stats.get(stat_key))
+        if total_value is None or opp_value is None:
+            continue
+
+        total += 1
+        match_total = total_value + opp_value
+        if side == "over" and match_total > line_value:
+            hits += 1
+        elif side == "under" and match_total < line_value:
+            hits += 1
+    return hits, total
+
+
+def build_hit_rate_text(
+    matchup_ctx: dict | None,
+    label: str,
+    sh_value: float,
+    cb_line: float,
+    history_cache: dict[tuple[int, int], dict | None],
+) -> tuple[str, int, int] | None:
+    stat_key = STATSHUB_KEY_MAP.get(label)
+    if not matchup_ctx or not stat_key:
+        return None
+
+    home_team_id = matchup_ctx.get("home_team_id")
+    away_team_id = matchup_ctx.get("away_team_id")
+    tournament_id = matchup_ctx.get("tournament_id")
+    if home_team_id is None or away_team_id is None or tournament_id is None:
+        return None
+
+    side = infer_bet_side(sh_value, cb_line)
+    if side is None:
+        return None
+
+    home_cache_key = (int(home_team_id), int(tournament_id))
+    away_cache_key = (int(away_team_id), int(tournament_id))
+    if home_cache_key not in history_cache:
+        history_cache[home_cache_key] = fetch_team_history(home_cache_key[0], home_cache_key[1])
+    if away_cache_key not in history_cache:
+        history_cache[away_cache_key] = fetch_team_history(away_cache_key[0], away_cache_key[1])
+
+    home_hits, home_total = count_hits(history_cache.get(home_cache_key), stat_key, side, cb_line)
+    away_hits, away_total = count_hits(history_cache.get(away_cache_key), stat_key, side, cb_line)
+    total_hits = home_hits + away_hits
+    total_games = home_total + away_total
+
+    side_text = "Over" if side == "over" else "Under"
+    return side_text, total_hits, total_games
+
+
+def main() -> None:
+    if load_dotenv is not None:
+        load_dotenv()
+    if not EXCEL_PATH.exists():
+        raise SystemExit("stats_averages.xlsx not found. Run statshub.py and crocobet_game_stats.py first.")
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        raise SystemExit("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID environment variables.")
+
+    try:
+        threshold = float(os.environ.get("STAT_DIFF_THRESHOLD_PCT", DEFAULT_THRESHOLD_PCT))
+    except ValueError:
+        threshold = DEFAULT_THRESHOLD_PCT
+
+    df = pd.read_excel(EXCEL_PATH, sheet_name=SHEET_NAME)
+    if df.empty:
+        return
+
+    matchup_context = {}
+    try:
+        matchup_context = build_matchup_context(fetch_games_today())
+    except requests.RequestException:
+        matchup_context = {}
+    history_cache: dict[tuple[int, int], dict | None] = {}
+    event_id_map = build_event_id_map(parse_json_file(MATCHES_PATH))
+    event_cache: dict[int, dict | None] = {}
+
+    for _, row in df.iterrows():
+        matchup = row.get("matchup")
+        if not isinstance(matchup, str) or not matchup.strip():
+            continue
+        matchup_key = normalize(matchup)
+        ctx = matchup_context.get(matchup_key)
+        event_id = event_id_map.get(matchup_key)
+        event_data = None
+        if event_id is not None:
+            if event_id not in event_cache:
+                event_cache[event_id] = fetch_crocobet_event(event_id)
+            event_data = event_cache.get(event_id)
+
+        parts = []
+        for label in STAT_ORDER:
+            sh_col = f"average_{label}"
+            cb_col = f"cb_{label}"
+            if sh_col not in df.columns or cb_col not in df.columns:
+                continue
+            sh_val = row.get(sh_col)
+            cb_val = row.get(cb_col)
+            if pd.isna(sh_val) or pd.isna(cb_val):
+                continue
+            pct = diff_percent(sh_val, cb_val)
+            if pct is None or pct < threshold:
+                continue
+            if pct > 100:
+                continue
+            stat_label = STAT_LABELS.get(label, label)
+            hit_data = build_hit_rate_text(
+                matchup_ctx=ctx,
+                label=label,
+                sh_value=float(sh_val),
+                cb_line=float(cb_val),
+                history_cache=history_cache,
+            )
+            side = "over" if float(sh_val) > float(cb_val) else "under"
+            cb_odd = get_cb_side_odd_for_line(
+                event_data=event_data,
+                label=label,
+                cb_line=float(cb_val),
+                side=side,
+            )
+            odd_text = format_number(cb_odd) if cb_odd is not None else "n/a"
+            odds_part = f"{side} {format_number(cb_val)} {stat_label.lower()} - {odd_text}"
+            value_part = f"{pct:.0f}%"
+            hit_part = "n/a"
+            if hit_data:
+                _, total_hits, total_games = hit_data
+                if total_games > 0:
+                    hit_part = f"{total_hits}/{total_games}"
+            part = f"{odds_part} | {value_part} | {hit_part}"
+            parts.append(part)
+
+        if not parts:
+            continue
+
+        message = f"{matchup}\n" + "\n".join(parts)
+        send_telegram_message(token, chat_id, message)
+
+
+if __name__ == "__main__":
+    main()
