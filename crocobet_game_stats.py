@@ -1,6 +1,7 @@
-﻿import json
+import json
 import re
 from pathlib import Path
+from datetime import datetime, time, timedelta, timezone
 
 import pandas as pd
 import requests
@@ -10,6 +11,7 @@ EXCEL_PATH = Path("stats_averages.xlsx")
 MATCHES_PATH = Path("json") / "crocobet_event_matches.json"
 EVENT_API_TEMPLATE = "https://api.crocobet.com/rest/market/events/{event_id}"
 DEBUG_MARKETS_PATH = Path("json") / "crocobet_event_markets_debug.json"
+BASE_SITE = "https://www.statshub.com"
 
 STAT_TARGETS = {
     "corners": {
@@ -54,6 +56,17 @@ EXCLUDE_TERMS = [
     "team",
     "half",
 ]
+
+STATSHUB_STAT_KEYS = {
+    "corners": "cornerKicks",
+    "cards": "cards",
+    "shots_on_target": "shotsOnGoal",
+    "total_shots": "totalShotsOnGoal",
+    "fouls": "fouls",
+    "goalkeeper_saves": "goalkeeperSaves",
+    "throw_ins": "throwIns",
+    "offsides": "offsides",
+}
 
 
 
@@ -121,6 +134,160 @@ def parse_odds(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def parse_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def fetch_games_for_window() -> list:
+    today = datetime.now().date()
+    tomorrow = today + timedelta(days=1)
+    start_ts = int(datetime.combine(today, time.min).timestamp())
+    end_ts = int(datetime.combine(tomorrow, time.max).timestamp())
+
+    api_url = f"{BASE_SITE}/api/event/by-date"
+    params = {"startOfDay": start_ts, "endOfDay": end_ts}
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": BASE_SITE + "/",
+    }
+    resp = requests.get(api_url, params=params, headers=headers, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    rows = data.get("data")
+    return rows if isinstance(rows, list) else []
+
+
+def fetch_team_history(team_id: int, limit: int = 200) -> list:
+    api_url = f"{BASE_SITE}/api/team/{team_id}/performance"
+    params = {
+        "limit": limit,
+        "location": "all",
+        "eventHalf": "ALL",
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": BASE_SITE + "/",
+    }
+    resp = requests.get(api_url, params=params, headers=headers, timeout=30)
+    resp.raise_for_status()
+    payload = resp.json()
+    rows = payload.get("data")
+    return rows if isinstance(rows, list) else []
+
+
+def build_team_id_map(games: list) -> dict:
+    def norm(text: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+    out = {}
+    for game in games:
+        if not isinstance(game, dict):
+            continue
+        home = game.get("homeTeam") or {}
+        away = game.get("awayTeam") or {}
+        home_name = home.get("name")
+        away_name = away.get("name")
+        home_id = home.get("id")
+        away_id = away.get("id")
+        if not isinstance(home_name, str) or not isinstance(away_name, str):
+            continue
+        if home_id is None or away_id is None:
+            continue
+        matchup = f"{home_name} - {away_name}"
+        out[norm(matchup)] = (int(home_id), int(away_id))
+    return out
+
+
+def build_h2h_matches(
+    history_rows: list,
+    home_team_id: int,
+    away_team_id: int,
+    min_year: int = 2023,
+    max_matches: int = 5,
+) -> list[dict]:
+    now_ts = int(datetime.now().timestamp())
+    seen_event_ids = set()
+    out = []
+
+    for row in history_rows:
+        if not isinstance(row, dict):
+            continue
+        event = row.get("event") or {}
+        home = row.get("homeTeam") or {}
+        away = row.get("awayTeam") or {}
+        stats = row.get("statistics") or {}
+        opp_stats = row.get("opponentStatistics") or {}
+
+        event_id = event.get("id")
+        time_start = event.get("timeStartTimestamp")
+        if event_id is None or time_start is None:
+            continue
+        try:
+            event_id = int(event_id)
+            ts = int(time_start)
+        except (TypeError, ValueError):
+            continue
+
+        if event_id in seen_event_ids:
+            continue
+        if ts >= now_ts:
+            continue
+
+        try:
+            year = datetime.fromtimestamp(ts, tz=timezone.utc).year
+        except (ValueError, OSError):
+            continue
+        if year < min_year:
+            continue
+
+        home_id = home.get("id")
+        away_id = away.get("id")
+        try:
+            ids = {int(home_id), int(away_id)}
+        except (TypeError, ValueError):
+            continue
+        if ids != {home_team_id, away_team_id}:
+            continue
+
+        totals = {}
+        for label, stat_key in STATSHUB_STAT_KEYS.items():
+            a = parse_float(stats.get(stat_key))
+            b = parse_float(opp_stats.get(stat_key))
+            totals[label] = a + b if a is not None and b is not None else None
+
+        seen_event_ids.add(event_id)
+        out.append({"event_id": event_id, "timestamp": ts, "totals": totals})
+
+    out.sort(key=lambda x: x["timestamp"], reverse=True)
+    return out[:max_matches]
+
+
+def compute_h2h_ratio(avg_value, cb_value, h2h_matches: list, label: str) -> str | None:
+    avg = parse_float(avg_value)
+    cb = parse_float(cb_value)
+    if avg is None or cb is None:
+        return None
+
+    values = [m["totals"].get(label) for m in h2h_matches]
+    values = [v for v in values if v is not None]
+    if not values:
+        return None
+
+    if avg > cb:
+        hits = sum(1 for v in values if v > cb)
+    elif avg < cb:
+        hits = sum(1 for v in values if v < cb)
+    else:
+        hits = sum(1 for v in values if v == cb)
+
+    return f"{hits}/{len(values)}"
 
 
 def find_best_argument(data: dict) -> dict:
@@ -230,6 +397,48 @@ def main():
                 }
             )
 
+    # H2H review (max 5, only matches from year >= 2023)
+    team_games = fetch_games_for_window()
+    matchup_to_team_ids = build_team_id_map(team_games)
+    team_history_cache: dict[int, list] = {}
+
+    for idx, row in summary_df.iterrows():
+        matchup = row.get("matchup")
+        if not isinstance(matchup, str):
+            continue
+        key = norm(matchup)
+        pair = matchup_to_team_ids.get(key)
+        if not pair:
+            continue
+
+        home_team_id, away_team_id = pair
+        if home_team_id not in team_history_cache:
+            try:
+                team_history_cache[home_team_id] = fetch_team_history(home_team_id)
+            except requests.RequestException:
+                team_history_cache[home_team_id] = []
+
+        h2h_matches = build_h2h_matches(
+            history_rows=team_history_cache[home_team_id],
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+            min_year=2023,
+            max_matches=5,
+        )
+
+        for label in STAT_ORDER:
+            h2h_col = f"h2h_{label}"
+            avg_col = f"average_{label}"
+            cb_col = f"cb_{label}"
+            if h2h_col not in summary_df.columns:
+                summary_df[h2h_col] = None
+            summary_df.at[idx, h2h_col] = compute_h2h_ratio(
+                row.get(avg_col),
+                row.get(cb_col),
+                h2h_matches,
+                label,
+            )
+
     preferred = ["tournament", "matchup", "home_team_shortname", "away_team_shortname"]
     for label in STAT_ORDER:
         avg_col = f"average_{label}"
@@ -238,6 +447,9 @@ def main():
         cb_col = f"cb_{label}"
         if cb_col in summary_df.columns:
             preferred.append(cb_col)
+        h2h_col = f"h2h_{label}"
+        if h2h_col in summary_df.columns:
+            preferred.append(h2h_col)
     remaining = [c for c in summary_df.columns if c not in preferred]
     summary_df = summary_df.reindex(columns=preferred + remaining)
 
