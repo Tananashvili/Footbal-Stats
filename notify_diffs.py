@@ -17,7 +17,7 @@ except ImportError:
 EXCEL_PATH = Path("stats_averages.xlsx")
 SHEET_NAME = "summary"
 DEFAULT_THRESHOLD_PCT = 20.0
-HIT_OVERRIDE_MIN = 15
+HIT_OVERRIDE_MIN = 16
 HIT_OVERRIDE_TOTAL = 20
 MATCHES_PATH = Path("json") / "crocobet_event_matches.json"
 EVENT_API_TEMPLATE = "https://api.crocobet.com/rest/market/events/{event_id}"
