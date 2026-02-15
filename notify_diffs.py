@@ -17,6 +17,8 @@ except ImportError:
 EXCEL_PATH = Path("stats_averages.xlsx")
 SHEET_NAME = "summary"
 DEFAULT_THRESHOLD_PCT = 20.0
+HIT_OVERRIDE_MIN = 15
+HIT_OVERRIDE_TOTAL = 20
 MATCHES_PATH = Path("json") / "crocobet_event_matches.json"
 EVENT_API_TEMPLATE = "https://api.crocobet.com/rest/market/events/{event_id}"
 
@@ -429,10 +431,6 @@ def main() -> None:
             if pd.isna(sh_val) or pd.isna(cb_val):
                 continue
             pct = diff_percent(sh_val, cb_val)
-            if pct is None or pct < threshold:
-                continue
-            if pct > 100:
-                continue
             stat_label = STAT_LABELS.get(label, label)
             hit_data = build_hit_rate_text(
                 matchup_ctx=ctx,
@@ -441,6 +439,16 @@ def main() -> None:
                 cb_line=float(cb_val),
                 history_cache=history_cache,
             )
+            total_hits = 0
+            total_games = 0
+            if hit_data:
+                _, total_hits, total_games = hit_data
+
+            hit_override = total_games == HIT_OVERRIDE_TOTAL and total_hits >= HIT_OVERRIDE_MIN
+            pct_ok = pct is not None and threshold <= pct <= 100
+            if not pct_ok and not hit_override:
+                continue
+
             side = "over" if float(sh_val) > float(cb_val) else "under"
             cb_odd = get_cb_side_odd_for_line(
                 event_data=event_data,
@@ -450,12 +458,10 @@ def main() -> None:
             )
             odd_text = format_number(cb_odd) if cb_odd is not None else "n/a"
             odds_part = f"{side} {format_number(cb_val)} {stat_label.lower()} - {odd_text}"
-            value_part = f"{pct:.0f}%"
+            value_part = f"{pct:.0f}%" if pct is not None else "n/a"
             hit_part = "n/a"
-            if hit_data:
-                _, total_hits, total_games = hit_data
-                if total_games > 0:
-                    hit_part = f"{total_hits}/{total_games}"
+            if total_games > 0:
+                hit_part = f"{total_hits}/{total_games}"
             part = f"{odds_part} | {value_part} | {hit_part}"
             parts.append(part)
 
