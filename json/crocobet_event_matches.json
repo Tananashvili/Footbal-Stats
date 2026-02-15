@@ -1,13 +1,5 @@
 [
   {
-    "matchup": "Rayo Vallecano - Atlético Madrid",
-    "matched_name": "Rayo Vallecano - Atletico",
-    "score": 0.848,
-    "league_id": 122069,
-    "event_id": 51351307,
-    "swapped": false
-  },
-  {
     "matchup": "Levante UD - Valencia",
     "matched_name": "Levante - Valencia",
     "score": 1.0,
@@ -24,22 +16,6 @@
     "swapped": false
   },
   {
-    "matchup": "Cremonese - Genoa",
-    "matched_name": "Cremonese - Genoa",
-    "score": 1.0,
-    "league_id": 122144,
-    "event_id": 51366175,
-    "swapped": false
-  },
-  {
-    "matchup": "Parma - Hellas Verona",
-    "matched_name": "Parma - Verona",
-    "score": 0.816,
-    "league_id": 122144,
-    "event_id": 51368413,
-    "swapped": false
-  },
-  {
     "matchup": "Torino - Bologna",
     "matched_name": "Torino - Bologna",
     "score": 1.0,
@@ -53,14 +29,6 @@
     "score": 1.0,
     "league_id": 122144,
     "event_id": 51368412,
-    "swapped": false
-  },
-  {
-    "matchup": "Le Havre - Toulouse",
-    "matched_name": "Le Havre - Toulouse",
-    "score": 1.0,
-    "league_id": 122074,
-    "event_id": 51366788,
     "swapped": false
   },
   {
@@ -88,35 +56,11 @@
     "swapped": false
   },
   {
-    "matchup": "FC Augsburg - 1. FC Heidenheim",
-    "matched_name": "Augsburg - Heidenheim",
-    "score": 0.955,
-    "league_id": 122140,
-    "event_id": 51370084,
-    "swapped": false
-  },
-  {
     "matchup": "RB Leipzig - VfL Wolfsburg",
     "matched_name": "Leipzig - Wolfsburg",
     "score": 0.821,
     "league_id": 122140,
     "event_id": 51370066,
-    "swapped": false
-  },
-  {
-    "matchup": "SC Heerenveen - PEC Zwolle",
-    "matched_name": "Heerenveen - Zwolle",
-    "score": 0.875,
-    "league_id": 122088,
-    "event_id": 51367204,
-    "swapped": false
-  },
-  {
-    "matchup": "SC Telstar - FC Twente",
-    "matched_name": "Telstar - Twente",
-    "score": 1.0,
-    "league_id": 122088,
-    "event_id": 51367392,
     "swapped": false
   },
   {
@@ -141,14 +85,6 @@
     "score": 1.0,
     "league_id": 122280,
     "event_id": 51379890,
-    "swapped": false
-  },
-  {
-    "matchup": "Göztepe - Kayserispor",
-    "matched_name": "Goztepe - Kayserispor",
-    "score": 1.0,
-    "league_id": 122247,
-    "event_id": 51380418,
     "swapped": false
   },
   {

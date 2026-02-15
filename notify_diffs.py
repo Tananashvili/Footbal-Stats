@@ -424,12 +424,17 @@ def main() -> None:
         for label in STAT_ORDER:
             sh_col = f"average_{label}"
             cb_col = f"cb_{label}"
+            h2h_col = f"h2h_{label}"
             if sh_col not in df.columns or cb_col not in df.columns:
                 continue
             sh_val = row.get(sh_col)
             cb_val = row.get(cb_col)
             if pd.isna(sh_val) or pd.isna(cb_val):
                 continue
+            h2h_val = row.get(h2h_col) if h2h_col in df.columns else None
+            h2h_text_from_sheet = None
+            if h2h_val is not None and not pd.isna(h2h_val):
+                h2h_text_from_sheet = str(h2h_val).strip() or None
             pct = diff_percent(sh_val, cb_val)
             stat_label = STAT_LABELS.get(label, label)
             hit_data = build_hit_rate_text(
@@ -462,7 +467,8 @@ def main() -> None:
             hit_part = "n/a"
             if total_games > 0:
                 hit_part = f"{total_hits}/{total_games}"
-            part = f"{odds_part} | {value_part} | {hit_part}"
+            h2h_part = h2h_text_from_sheet or "n/a"
+            part = f"{odds_part} | {value_part} | {hit_part} | H2H {h2h_part}"
             parts.append(part)
 
         if not parts:
