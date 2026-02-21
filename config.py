@@ -114,6 +114,7 @@ TEAM_ABBREVIATIONS = {
     "int": "inter",
     "intl": "international",
     "inzer": "inter",
+    "guimaraes": "vitoria",
 }
 
 TEAM_STOPWORDS = {
@@ -132,7 +133,6 @@ TEAM_STOPWORDS = {
     "tsg",
     "vf",
     "afc",
-    "real",
     "stade",
     "olympique",
     "club",

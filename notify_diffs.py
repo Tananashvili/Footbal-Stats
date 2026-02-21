@@ -64,6 +64,7 @@ def diff_percent(sh_value: float, cb_value: float) -> float | None:
 def send_telegram_message(token: str, chat_id: str, text: str) -> None:
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
+    print(f"[Telegram] Sending message to {chat_id}:\n{text}\n")
     resp = requests.post(url, json=payload, timeout=config.HTTP_TIMEOUT_SECONDS)
     resp.raise_for_status()
 

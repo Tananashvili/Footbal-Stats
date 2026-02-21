@@ -55,22 +55,13 @@ def main():
 
     # Compare to Excel matchups (fuzzy)
     summary_df = pd.read_excel("stats_averages.xlsx", sheet_name="summary")
-    matchups = [m.strip() for m in summary_df.get("matchup", []).dropna().tolist()]
-    tournaments = [
-        str(t).strip()
-        for t in summary_df.get("tournament", []).dropna().tolist()
-    ]
-    home_shorts = [
-        str(s).strip()
-        for s in summary_df.get("home_team_shortname", []).dropna().tolist()
-    ]
-    away_shorts = [
-        str(s).strip()
-        for s in summary_df.get("away_team_shortname", []).dropna().tolist()
-    ]
-
     matchup_records = []
-    for idx, matchup in enumerate(matchups):
+    shortname_records = []
+    for _, row in summary_df.iterrows():
+        matchup = row.get("matchup")
+        if not isinstance(matchup, str):
+            continue
+        matchup = matchup.strip()
         if " - " not in matchup:
             continue
         m_home, m_away = matchup.split(" - ", 1)
@@ -82,24 +73,26 @@ def main():
             "away": m_away,
             "home_n": normalize_team(m_home),
             "away_n": normalize_team(m_away),
-            "tournament": tournaments[idx] if idx < len(tournaments) else "",
+            "tournament": str(row.get("tournament") or "").strip(),
         }
         record["tournament_n"] = normalize_tournament(record["tournament"])
         matchup_records.append(record)
 
-    shortname_records = []
-    for hs, as_ in zip(home_shorts, away_shorts):
-        if not hs or not as_:
+        hs = str(row.get("home_team_shortname") or "").strip()
+        as_ = str(row.get("away_team_shortname") or "").strip()
+        if not hs or not as_ or " - " not in matchup:
             continue
         hs = apply_alias(hs, aliases)
         as_ = apply_alias(as_, aliases)
         shortname_records.append(
             {
-                "matchup": f"{hs} - {as_}",
+                "matchup": matchup,
+                "short_matchup": f"{hs} - {as_}",
                 "home": hs,
                 "away": as_,
                 "home_n": normalize_team(hs),
                 "away_n": normalize_team(as_),
+                "tournament_n": record["tournament_n"],
             }
         )
 
@@ -154,13 +147,23 @@ def main():
 
             # Shortname boost (if provided)
             if best_score < 0.75 and shortname_records:
-                for record in shortname_records:
+                short_candidates = shortname_records
+                if ev_league:
+                    league_filtered = [
+                        r
+                        for r in shortname_records
+                        if r["tournament_n"]
+                        and similarity(ev_league, r["tournament_n"]) >= 0.6
+                    ]
+                    if league_filtered:
+                        short_candidates = league_filtered
+                for record in short_candidates:
                     score = score_match(ev_home_n, ev_away_n, record["home_n"], record["away_n"])
                     if score > best_score:
                         best_score = score
                         best = record["matchup"]
                         best_swapped = False
-                    top_candidates.append((record["matchup"], score))
+                    top_candidates.append((record["short_matchup"], score))
 
             top_candidates.sort(key=lambda x: x[1], reverse=True)
             top_candidates = [
@@ -294,9 +297,35 @@ def similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
+def team_similarity(a: str, b: str) -> float:
+    a = (a or "").strip()
+    b = (b or "").strip()
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+
+    base = similarity(a, b)
+    a_tokens = a.split()
+    b_tokens = b.split()
+    if not a_tokens or not b_tokens:
+        return base
+
+    inter = len(set(a_tokens) & set(b_tokens))
+    token_overlap = inter / max(len(set(a_tokens)), len(set(b_tokens)))
+    best = max(base, token_overlap)
+
+    # Handle shortened names such as "real" vs "real madrid".
+    if len(a_tokens) == 1 and a_tokens[0] in b_tokens:
+        best = max(best, 0.86)
+    if len(b_tokens) == 1 and b_tokens[0] in a_tokens:
+        best = max(best, 0.86)
+    return best
+
+
 def score_match(ev_home_n: str, ev_away_n: str, m_home_n: str, m_away_n: str) -> float:
-    score_home = (similarity(ev_home_n, m_home_n) + similarity(ev_away_n, m_away_n)) / 2
-    score_swap = (similarity(ev_home_n, m_away_n) + similarity(ev_away_n, m_home_n)) / 2
+    score_home = (team_similarity(ev_home_n, m_home_n) + team_similarity(ev_away_n, m_away_n)) / 2
+    score_swap = (team_similarity(ev_home_n, m_away_n) + team_similarity(ev_away_n, m_home_n)) / 2
     score_swap = max(0.0, score_swap - 0.08)
     return max(score_home, score_swap)
 
