@@ -208,3 +208,5 @@ __marimo__/
 
 # Project generated data
 json/
+
+.stats_averages.xlsx
