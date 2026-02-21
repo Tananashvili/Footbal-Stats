@@ -1,6 +1,7 @@
 import json
 import os
 import time as _time
+from pathlib import Path
 import requests
 from datetime import datetime, time, timedelta
 from urllib.parse import urljoin
@@ -205,13 +206,17 @@ def build_game_row(game_data, home_history, away_history):
     return row
 
 
-def save_stats_to_excel(rows, output_path="stats_averages.xlsx"):
+def save_stats_to_excel(rows, output_path=None):
     try:
         import pandas as pd
     except ImportError as exc:
         raise ImportError(
             "pandas is required to write Excel files. Install with: pip install pandas openpyxl"
         ) from exc
+
+    if output_path is None:
+        output_path = config.EXCEL_PATH
+    output_path = Path(output_path)
 
     if not rows:
         return None
@@ -249,6 +254,7 @@ def save_stats_to_excel(rows, output_path="stats_averages.xlsx"):
 
     summary_df = df.reindex(columns=summary_cols).rename(columns=summary_map)
 
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="full", index=False)
         summary_df.to_excel(writer, sheet_name="summary", index=False)

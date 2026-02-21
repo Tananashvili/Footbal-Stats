@@ -1,7 +1,7 @@
 from pathlib import Path
 
 # Shared paths
-EXCEL_PATH = Path("stats_averages.xlsx")
+EXCEL_PATH = Path("json") / "stats_averages.xlsx"
 SHEET_SUMMARY = "summary"
 MATCHES_PATH = Path("json") / "crocobet_event_matches.json"
 DEBUG_MARKETS_PATH = Path("json") / "crocobet_event_markets_debug.json"

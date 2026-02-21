@@ -357,7 +357,9 @@ def main() -> None:
     if load_dotenv is not None:
         load_dotenv()
     if not EXCEL_PATH.exists():
-        raise SystemExit("stats_averages.xlsx not found. Run statshub.py and crocobet_game_stats.py first.")
+        raise SystemExit(
+            f"{EXCEL_PATH} not found. Run statshub.py and crocobet_game_stats.py first."
+        )
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")

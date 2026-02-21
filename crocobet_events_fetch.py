@@ -54,7 +54,7 @@ def main():
         json.dump(all_events, f, ensure_ascii=False, indent=2)
 
     # Compare to Excel matchups (fuzzy)
-    summary_df = pd.read_excel("stats_averages.xlsx", sheet_name="summary")
+    summary_df = pd.read_excel(config.EXCEL_PATH, sheet_name="summary")
     matchup_records = []
     shortname_records = []
     for _, row in summary_df.iterrows():

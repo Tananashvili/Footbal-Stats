@@ -3,7 +3,7 @@ import sys
 
 
 STEPS = [
-    ("statshub.py", "Generate stats_averages.xlsx"),
+    ("statshub.py", "Generate json/stats_averages.xlsx"),
     ("crocobet_events_fetch.py", "Fetch Crocobet fixtures + matches"),
     ("crocobet_game_stats.py", "Fetch Crocobet event stats and update Excel"),
     ("notify_diffs.py", "Notify Telegram when Statshub vs Crocobet differs"),
