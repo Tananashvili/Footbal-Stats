@@ -5,6 +5,7 @@ import re
 import json
 from datetime import datetime, time, timedelta
 from pathlib import Path
+from difflib import SequenceMatcher
 
 import pandas as pd
 import requests
@@ -22,6 +23,9 @@ HIT_OVERRIDE_MIN = config.HIT_OVERRIDE_MIN
 HIT_OVERRIDE_TOTAL = config.HIT_OVERRIDE_TOTAL
 MATCHES_PATH = config.MATCHES_PATH
 EVENT_API_TEMPLATE = config.CROCOBET_EVENT_URL_TEMPLATE
+ODDS_DB_PATH = config.ODDS_DB_PATH
+ODDS_DB_SHEET = config.ODDS_DB_SHEET
+ODDS_TRANSLATIONS_PATH = config.ODDS_TRANSLATIONS_PATH
 
 STAT_ORDER = config.STAT_ORDER
 STAT_LABELS = config.STAT_LABELS
@@ -36,6 +40,11 @@ CB_EXCLUDE_PHRASES = {
     label: spec.get("exclude_phrases", [])
     for label, spec in config.CROCOBET_STAT_TARGETS.items()
     if spec.get("exclude_phrases")
+}
+
+TEAM_NOISE_TOKENS = {
+    "fc", "afc", "cf", "sc", "ac", "as", "ud", "cd", "fk",
+    "club", "de", "the", "and",
 }
 
 
@@ -72,6 +81,24 @@ def normalize(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", text.lower())
 
 
+def normalize_team_for_fuzzy(name: str) -> str:
+    tokens = re.findall(r"[a-z0-9]+", str(name).lower())
+    if not tokens:
+        return ""
+    filtered = [t for t in tokens if t not in TEAM_NOISE_TOKENS]
+    if not filtered:
+        filtered = tokens
+    return "".join(filtered)
+
+
+def normalize_matchup_for_fuzzy(matchup: str) -> str:
+    parts = split_matchup(matchup)
+    if not parts:
+        return normalize(matchup)
+    home, away = parts
+    return f"{normalize_team_for_fuzzy(home)}-{normalize_team_for_fuzzy(away)}"
+
+
 def parse_odds(value) -> float | None:
     try:
         return float(value)
@@ -91,6 +118,207 @@ def parse_json_file(path: Path) -> list[dict]:
     except Exception:
         return []
     return payload if isinstance(payload, list) else []
+
+
+def normalize_stat_key(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+
+
+def split_matchup(matchup: str) -> tuple[str, str] | None:
+    if not isinstance(matchup, str) or " - " not in matchup:
+        return None
+    home, away = matchup.split(" - ", 1)
+    home = home.strip()
+    away = away.strip()
+    if not home or not away:
+        return None
+    return home, away
+
+
+def ensure_translation_file(path: Path, summary_df: pd.DataFrame, odds_df: pd.DataFrame) -> None:
+    if path.exists():
+        return
+
+    en_teams: set[str] = set()
+    if "matchup" in summary_df.columns:
+        for matchup in summary_df["matchup"].dropna().astype(str).tolist():
+            parts = split_matchup(matchup)
+            if not parts:
+                continue
+            en_teams.add(parts[0])
+            en_teams.add(parts[1])
+
+    geo_teams: set[str] = set()
+    if "event_name" in odds_df.columns:
+        for matchup in odds_df["event_name"].dropna().astype(str).tolist():
+            parts = split_matchup(matchup)
+            if not parts:
+                continue
+            geo_teams.add(parts[0])
+            geo_teams.add(parts[1])
+
+    default_pos_map = {
+        "corners": "corners",
+        "cards": "cards",
+        "shots_on_target": "",
+        "total_shots": "",
+        "fouls": "fouls",
+        "goalkeeper_saves": "",
+        "throw_ins": "throw_ins",
+        "offsides": "",
+    }
+
+    payload = {
+        "notes": "Fill Georgian->English team names. Leave unsupported position mappings empty.",
+        "team_geo_to_en": {name: "" for name in sorted(geo_teams)},
+        "team_en_to_geo": {name: "" for name in sorted(en_teams)},
+        "positions_notify_to_odds": default_pos_map,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_translations(path: Path) -> dict:
+    defaults = {
+        "team_geo_to_en": {},
+        "team_en_to_geo": {},
+        "positions_notify_to_odds": {
+            "corners": "corners",
+            "cards": "cards",
+            "shots_on_target": "",
+            "total_shots": "",
+            "fouls": "fouls",
+            "goalkeeper_saves": "",
+            "throw_ins": "throw_ins",
+            "offsides": "",
+        },
+    }
+    if not path.exists():
+        return defaults
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return defaults
+    if not isinstance(data, dict):
+        return defaults
+
+    for key in ("team_geo_to_en", "team_en_to_geo", "positions_notify_to_odds"):
+        val = data.get(key)
+        if not isinstance(val, dict):
+            continue
+        defaults[key].update({str(k): str(v) for k, v in val.items()})
+    return defaults
+
+
+def build_provider_odds_index(odds_df: pd.DataFrame, translations: dict) -> dict[tuple[str, str, float], dict]:
+    out: dict[tuple[str, str, float], dict] = {}
+    geo_to_en = translations.get("team_geo_to_en", {}) or {}
+
+    required = {
+        "event_name",
+        "stat_type",
+        "line",
+        "crocobet_over_odds",
+        "crocobet_under_odds",
+        "europebet_over_odds",
+        "europebet_under_odds",
+        "betlive_over_odds",
+        "betlive_under_odds",
+    }
+    if not required.issubset(set(odds_df.columns)):
+        return out
+
+    for _, row in odds_df.iterrows():
+        matchup_geo = row.get("event_name")
+        parts = split_matchup(str(matchup_geo)) if pd.notna(matchup_geo) else None
+        if not parts:
+            continue
+        home_en = str(geo_to_en.get(parts[0], "")).strip()
+        away_en = str(geo_to_en.get(parts[1], "")).strip()
+        if not home_en or not away_en:
+            continue
+        matchup_en = f"{home_en} - {away_en}"
+
+        stat_type = normalize_stat_key(str(row.get("stat_type", "")))
+        if not stat_type:
+            continue
+        line = parse_float(row.get("line"))
+        if line is None:
+            continue
+        key = (normalize(matchup_en), stat_type, round(line, 2))
+        out[key] = {
+            "crocobet_over": parse_odds(row.get("crocobet_over_odds")),
+            "crocobet_under": parse_odds(row.get("crocobet_under_odds")),
+            "europebet_over": parse_odds(row.get("europebet_over_odds")),
+            "europebet_under": parse_odds(row.get("europebet_under_odds")),
+            "betlive_over": parse_odds(row.get("betlive_over_odds")),
+            "betlive_under": parse_odds(row.get("betlive_under_odds")),
+        }
+    return out
+
+
+def get_provider_odds_text(
+    provider_index: dict[tuple[str, str, float], dict],
+    translations: dict,
+    matchup: str,
+    label: str,
+    cb_line: float,
+    side: str,
+    cb_fallback: float | None,
+) -> str:
+    pos_map = translations.get("positions_notify_to_odds", {}) or {}
+    mapped_stat = normalize_stat_key(str(pos_map.get(label, label)))
+    if not mapped_stat:
+        cb_text = format_number(cb_fallback) if cb_fallback is not None else "n/a"
+        return f"CB - {cb_text}, EU - n/a, BL - n/a"
+
+    lookup_keys = [
+        (normalize(matchup), mapped_stat, round(cb_line, 2)),
+        (normalize(matchup), mapped_stat, round(cb_line, 1)),
+    ]
+    row = None
+    for key in lookup_keys:
+        row = provider_index.get(key)
+        if row is not None:
+            break
+
+    if row is None:
+        target_mk = normalize(matchup)
+        target_fuzzy = normalize_matchup_for_fuzzy(matchup)
+        best_score = 0.0
+        best_row = None
+        for (mk, stat_key, line_key), rec in provider_index.items():
+            if stat_key != mapped_stat:
+                continue
+            if abs(float(line_key) - float(cb_line)) > config.PROVIDER_LINE_TOLERANCE:
+                continue
+            score_plain = SequenceMatcher(None, target_mk, mk).ratio()
+            score_fuzzy = SequenceMatcher(
+                None,
+                target_fuzzy,
+                normalize_matchup_for_fuzzy(mk),
+            ).ratio()
+            score = max(score_plain, score_fuzzy)
+            if score > best_score:
+                best_score = score
+                best_row = rec
+        if best_row is not None and best_score >= config.PROVIDER_MATCHUP_FUZZY_MIN:
+            row = best_row
+
+    if row is None:
+        cb_text = format_number(cb_fallback) if cb_fallback is not None else "n/a"
+        return f"CB - {cb_text}, EU - n/a, BL - n/a"
+
+    cb_val = row.get(f"crocobet_{side}")
+    eu_val = row.get(f"europebet_{side}")
+    bl_val = row.get(f"betlive_{side}")
+    if cb_val is None:
+        cb_val = cb_fallback
+
+    cb_text = format_number(cb_val) if cb_val is not None else "n/a"
+    eu_text = format_number(eu_val) if eu_val is not None else "n/a"
+    bl_text = format_number(bl_val) if bl_val is not None else "n/a"
+    return f"CB - {cb_text}, EU - {eu_text}, BL - {bl_text}"
 
 
 def build_event_id_map(records: list[dict]) -> dict[str, int]:
@@ -371,6 +599,16 @@ def main() -> None:
     df = pd.read_excel(EXCEL_PATH, sheet_name=SHEET_NAME)
     if df.empty:
         return
+    odds_df = pd.DataFrame()
+    if ODDS_DB_PATH.exists():
+        try:
+            odds_df = pd.read_excel(ODDS_DB_PATH, sheet_name=ODDS_DB_SHEET)
+        except Exception:
+            odds_df = pd.DataFrame()
+
+    ensure_translation_file(ODDS_TRANSLATIONS_PATH, df, odds_df)
+    translations = load_translations(ODDS_TRANSLATIONS_PATH)
+    provider_index = build_provider_odds_index(odds_df, translations)
 
     matchup_context = {}
     try:
@@ -437,14 +675,23 @@ def main() -> None:
                 cb_line=float(cb_val),
                 side=side,
             )
+            providers_text = get_provider_odds_text(
+                provider_index=provider_index,
+                translations=translations,
+                matchup=matchup,
+                label=label,
+                cb_line=float(cb_val),
+                side=side,
+                cb_fallback=cb_odd,
+            )
             odd_text = format_number(cb_odd) if cb_odd is not None else "n/a"
-            odds_part = f"{side} {format_number(cb_val)} {stat_label.lower()} - {odd_text}"
+            odds_part = f"{side} {format_number(cb_val)} {stat_label.lower()}"
             value_part = f"{pct:.0f}%" if pct is not None else "n/a"
             hit_part = "n/a"
             if total_games > 0:
                 hit_part = f"{total_hits}/{total_games}"
             h2h_part = h2h_text_from_sheet or "n/a"
-            part = f"{odds_part} | {value_part} | {hit_part} | H2H {h2h_part}"
+            part = f"{odds_part} | {value_part} | {hit_part} | H2H {h2h_part}\n{providers_text}"
             parts.append(part)
 
         if not parts:

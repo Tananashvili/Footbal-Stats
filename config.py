@@ -6,6 +6,12 @@ SHEET_SUMMARY = "summary"
 MATCHES_PATH = Path("json") / "crocobet_event_matches.json"
 DEBUG_MARKETS_PATH = Path("json") / "crocobet_event_markets_debug.json"
 
+ODDS_DB_PATH = Path(r"C:\Users\Tamar Saginashvili\Desktop\Saba\Odds-Scraper\json\stats_odds_combined.xlsx")
+ODDS_DB_SHEET = "matched_only"
+ODDS_TRANSLATIONS_PATH = Path("json") / "odds_translations.json"
+PROVIDER_MATCHUP_FUZZY_MIN = 0.86
+PROVIDER_LINE_TOLERANCE = 0.15
+
 # Shared API settings
 BASE_SITE = "https://www.statshub.com"
 HTTP_TIMEOUT_SECONDS = 30
