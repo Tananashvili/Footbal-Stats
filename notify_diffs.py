@@ -3,72 +3,38 @@ from __future__ import annotations
 import os
 import re
 import json
-from datetime import datetime, time
-from pathlib import Path
+from datetime import datetime, time, timedelta
 
 import pandas as pd
 import requests
+import config
 
 try:
     from dotenv import load_dotenv
 except ImportError:
     load_dotenv = None
 
-EXCEL_PATH = Path("stats_averages.xlsx")
-SHEET_NAME = "summary"
-DEFAULT_THRESHOLD_PCT = 20.0
-HIT_OVERRIDE_MIN = 16
-HIT_OVERRIDE_TOTAL = 20
-MATCHES_PATH = Path("json") / "crocobet_event_matches.json"
-EVENT_API_TEMPLATE = "https://api.crocobet.com/rest/market/events/{event_id}"
+EXCEL_PATH = config.EXCEL_PATH
+SHEET_NAME = config.SHEET_SUMMARY
+DEFAULT_THRESHOLD_PCT = config.DEFAULT_THRESHOLD_PCT
+HIT_OVERRIDE_MIN = config.HIT_OVERRIDE_MIN
+HIT_OVERRIDE_TOTAL = config.HIT_OVERRIDE_TOTAL
+MATCHES_PATH = config.MATCHES_PATH
+EVENT_API_TEMPLATE = config.CROCOBET_EVENT_URL_TEMPLATE
 
-STAT_ORDER = [
-    "corners",
-    "cards",
-    "shots_on_target",
-    "total_shots",
-    "fouls",
-    "goalkeeper_saves",
-    "throw_ins",
-    "offsides",
-]
+STAT_ORDER = config.STAT_ORDER
+STAT_LABELS = config.STAT_LABELS
 
-STAT_LABELS = {
-    "corners": "Corners",
-    "cards": "Cards",
-    "shots_on_target": "Shots on target",
-    "total_shots": "Total shots",
-    "fouls": "Fouls",
-    "goalkeeper_saves": "Goalkeeper saves",
-    "throw_ins": "Throw-ins",
-    "offsides": "Offsides",
-}
-
-
-BASE_SITE = "https://www.statshub.com"
-STATSHUB_KEY_MAP = {
-    "corners": "cornerKicks",
-    "cards": "cards",
-    "shots_on_target": "shotsOnGoal",
-    "total_shots": "totalShotsOnGoal",
-    "fouls": "fouls",
-    "goalkeeper_saves": "goalkeeperSaves",
-    "throw_ins": "throwIns",
-    "offsides": "offsides",
-}
+BASE_SITE = config.BASE_SITE
+STATSHUB_KEY_MAP = config.STATSHUB_STAT_KEYS
 CB_MARKET_PHRASES = {
-    "corners": ["corner"],
-    "cards": ["card"],
-    "shots_on_target": ["shots on target"],
-    "total_shots": ["shots"],
-    "fouls": ["foul"],
-    "goalkeeper_saves": ["save"],
-    "throw_ins": ["throw-in", "throw in", "throwins"],
-    "offsides": ["offside"],
+    label: spec.get("phrases", []) for label, spec in config.CROCOBET_STAT_TARGETS.items()
 }
-CB_EXCLUDE_TERMS = ["team", "half"]
+CB_EXCLUDE_TERMS = config.CROCOBET_MARKET_EXCLUDE_TERMS
 CB_EXCLUDE_PHRASES = {
-    "total_shots": ["shots on target"],
+    label: spec.get("exclude_phrases", [])
+    for label, spec in config.CROCOBET_STAT_TARGETS.items()
+    if spec.get("exclude_phrases")
 }
 
 
@@ -97,7 +63,7 @@ def diff_percent(sh_value: float, cb_value: float) -> float | None:
 def send_telegram_message(token: str, chat_id: str, text: str) -> None:
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
-    resp = requests.post(url, json=payload, timeout=30)
+    resp = requests.post(url, json=payload, timeout=config.HTTP_TIMEOUT_SECONDS)
     resp.raise_for_status()
 
 
@@ -151,7 +117,7 @@ def fetch_crocobet_event(event_id: int) -> dict | None:
         "Request-Language": "en",
     }
     try:
-        resp = requests.get(url, headers=headers, timeout=30)
+        resp = requests.get(url, headers=headers, timeout=config.HTTP_TIMEOUT_SECONDS)
         resp.raise_for_status()
     except requests.RequestException:
         return None
@@ -231,7 +197,10 @@ def get_cb_side_odd_for_line(
 def fetch_games_today() -> list[dict]:
     today = datetime.now().date()
     start_dt = datetime.combine(today, time.min)
-    end_dt = datetime.combine(today, time.max)
+    end_dt = datetime.combine(
+        today + timedelta(days=config.WINDOW_END_DAYS),
+        time(config.WINDOW_END_HOUR, 0, 0),
+    )
     params = {
         "startOfDay": int(start_dt.timestamp()),
         "endOfDay": int(end_dt.timestamp()),
@@ -242,7 +211,9 @@ def fetch_games_today() -> list[dict]:
         "Referer": BASE_SITE + "/",
     }
     url = f"{BASE_SITE}/api/event/by-date"
-    resp = requests.get(url, params=params, headers=headers, timeout=30)
+    resp = requests.get(
+        url, params=params, headers=headers, timeout=config.HTTP_TIMEOUT_SECONDS
+    )
     resp.raise_for_status()
     payload = resp.json()
     data = payload.get("data", []) if isinstance(payload, dict) else []
@@ -276,7 +247,7 @@ def fetch_team_history(team_id: int, tournament_id: int) -> dict | None:
     url = f"{BASE_SITE}/api/team/{team_id}/performance?"
     params = {
         "tournamentId": tournament_id,
-        "limit": 10,
+        "limit": config.NOTIFY_HISTORY_LIMIT,
         "location": "all",
         "eventHalf": "ALL",
     }
@@ -286,7 +257,9 @@ def fetch_team_history(team_id: int, tournament_id: int) -> dict | None:
         "Referer": BASE_SITE + "/",
     }
     try:
-        resp = requests.get(url, params=params, headers=headers, timeout=30)
+        resp = requests.get(
+            url, params=params, headers=headers, timeout=config.HTTP_TIMEOUT_SECONDS
+        )
         resp.raise_for_status()
     except requests.RequestException:
         return None
@@ -437,6 +410,8 @@ def main() -> None:
                 h2h_text_from_sheet = str(h2h_val).strip() or None
             pct = diff_percent(sh_val, cb_val)
             stat_label = STAT_LABELS.get(label, label)
+            if pct is not None and pct > 100:
+                continue
             hit_data = build_hit_rate_text(
                 matchup_ctx=ctx,
                 label=label,

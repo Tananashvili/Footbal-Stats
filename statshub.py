@@ -4,19 +4,22 @@ import time as _time
 import requests
 from datetime import datetime, time, timedelta
 from urllib.parse import urljoin
+import config
 
-BASE_SITE = "https://www.statshub.com"
+BASE_SITE = config.BASE_SITE
 
 # ---- Calculate start of TODAY and end at 02:00 next day ----
 today = datetime.now().date()
 start_dt = datetime.combine(today, time.min)          # 00:00:00
-end_dt = datetime.combine(today + timedelta(days=1), time(2, 0))  # 02:00:00 next day
+end_dt = datetime.combine(
+    today + timedelta(days=config.WINDOW_END_DAYS),
+    time(config.WINDOW_END_HOUR, 0, 0),
+)
 
 startOfDay = int(start_dt.timestamp())
 endOfDay = end_dt.timestamp()                          # keep decimals
 
-TOP_5_LEAGUES = ["Premier League", "Serie A", "Ligue 1", "LaLiga", "Bundesliga", 
-                 "Eredivisie", "Liga Portugal Betclic", "Super Lig"]
+TOP_5_LEAGUES = config.STATSHUB_TARGET_TOURNAMENTS
 
 
 def get_games_data(startOfDay, endOfDay):
@@ -34,7 +37,9 @@ def get_games_data(startOfDay, endOfDay):
     }
 
     # ---- Request ----
-    response = requests.get(api_url, params=params, headers=headers, timeout=30)
+    response = requests.get(
+        api_url, params=params, headers=headers, timeout=config.HTTP_TIMEOUT_SECONDS
+    )
     response.raise_for_status()
     data = response.json()
 
@@ -67,7 +72,7 @@ def get_games_data(startOfDay, endOfDay):
 
 
 def get_games_history(game_data, team_id, retries=3, backoff_seconds=2):
-    game_limit = 10
+    game_limit = config.STATSHUB_HISTORY_LIMIT
     api_url = f"https://www.statshub.com/api/team/{team_id}/performance?"
 
     params = {
@@ -87,7 +92,9 @@ def get_games_history(game_data, team_id, retries=3, backoff_seconds=2):
     last_exc = None
     for attempt in range(retries):
         try:
-            response = requests.get(api_url, params=params, headers=headers, timeout=30)
+            response = requests.get(
+                api_url, params=params, headers=headers, timeout=config.HTTP_TIMEOUT_SECONDS
+            )
             response.raise_for_status()
             return response.json()
         except requests.RequestException as exc:

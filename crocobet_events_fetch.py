@@ -6,105 +6,18 @@ from difflib import SequenceMatcher
 
 import pandas as pd
 import requests
+import config
 
 
-LEAGUE_IDS = [
-    122128,
-    122069,
-    122144,
-    122074,
-    122140,
-    122088,
-    122280,
-    122247,
-    122230,
-    122129,
-    122143,
-    133614,
-    # cup torunaments
-    # 93110,
-    # 122343,
-    # 93590,
-    # 122256,
-    # 92873,
-]
+LEAGUE_IDS = config.CROCOBET_LEAGUE_IDS
 
-URL_TEMPLATE = "https://api.crocobet.com/rest/market/categories/multi/{league_id}/events"
+URL_TEMPLATE = config.CROCOBET_EVENTS_URL_TEMPLATE
 
-ABBREVIATIONS = {
-    "utd": "united",
-    "st": "saint",
-    "ath": "athletic",
-    "atl": "atletico",
-    "dept": "deportivo",
-    "dep": "deportivo",
-    "int": "inter",
-    "intl": "international",
-    "inzer": "inter",
-}
+ABBREVIATIONS = config.TEAM_ABBREVIATIONS
 
-STOPWORDS = {
-    "fc",
-    "sc",
-    "ac",
-    "as",
-    "cf",
-    "cd",
-    "ud",
-    "bk",
-    "fk",
-    "sk",
-    "ssc",
-    "sv",
-    "tsg",
-    "vf",
-    "afc",
-    "real",
-    "stade",
-    "olympique",
-    "club",
-    "de",
-    "la",
-    "el",
-    "the",
-    "calcio",
-    "sporting",
-    "united",
-    "city",
-    "town",
-    "racing",
-    "and",
-}
+STOPWORDS = config.TEAM_STOPWORDS
 
-TEAM_SUFFIXES = {
-    "res",
-    "reserve",
-    "reserves",
-    "ii",
-    "iii",
-    "b",
-    "c",
-    "u16",
-    "u17",
-    "u18",
-    "u19",
-    "u20",
-    "u21",
-    "u22",
-    "u23",
-    "u24",
-    "u25",
-    "u26",
-    "youth",
-    "academy",
-    "junior",
-    "women",
-    "w",
-    "ladies",
-    "femenino",
-    "femenina",
-    "fem",
-}
+TEAM_SUFFIXES = config.TEAM_SUFFIXES
 
 
 def main():
@@ -126,7 +39,7 @@ def main():
     all_events = []
     for league_id in LEAGUE_IDS:
         url = URL_TEMPLATE.format(league_id=league_id)
-        resp = requests.get(url, headers=headers, timeout=30)
+        resp = requests.get(url, headers=headers, timeout=config.HTTP_TIMEOUT_SECONDS)
         resp.raise_for_status()
         data = resp.json()
         all_events.append(

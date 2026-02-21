@@ -5,68 +5,19 @@ from datetime import datetime, time, timedelta, timezone
 
 import pandas as pd
 import requests
+import config
 
 
-EXCEL_PATH = Path("stats_averages.xlsx")
-MATCHES_PATH = Path("json") / "crocobet_event_matches.json"
-EVENT_API_TEMPLATE = "https://api.crocobet.com/rest/market/events/{event_id}"
-DEBUG_MARKETS_PATH = Path("json") / "crocobet_event_markets_debug.json"
-BASE_SITE = "https://www.statshub.com"
+EXCEL_PATH = config.EXCEL_PATH
+MATCHES_PATH = config.MATCHES_PATH
+EVENT_API_TEMPLATE = config.CROCOBET_EVENT_URL_TEMPLATE
+DEBUG_MARKETS_PATH = config.DEBUG_MARKETS_PATH
+BASE_SITE = config.BASE_SITE
 
-STAT_TARGETS = {
-    "corners": {
-        "phrases": ["corner"],
-    },
-    "cards": {
-        "phrases": ["card"],
-    },
-    "shots_on_target": {
-        "phrases": ["shots on target"],
-    },
-    "total_shots": {
-        "phrases": ["shots"],
-        "exclude_phrases": ["shots on target"],
-    },
-    "fouls": {
-        "phrases": ["foul"],
-    },
-    "goalkeeper_saves": {
-        "phrases": ["save"],
-    },
-    "throw_ins": {
-        "phrases": ["throw-in", "throw in", "throwins"],
-    },
-    "offsides": {
-        "phrases": ["offside"],
-    },
-}
-
-STAT_ORDER = [
-    "corners",
-    "cards",
-    "shots_on_target",
-    "total_shots",
-    "fouls",
-    "goalkeeper_saves",
-    "throw_ins",
-    "offsides",
-]
-
-EXCLUDE_TERMS = [
-    "team",
-    "half",
-]
-
-STATSHUB_STAT_KEYS = {
-    "corners": "cornerKicks",
-    "cards": "cards",
-    "shots_on_target": "shotsOnGoal",
-    "total_shots": "totalShotsOnGoal",
-    "fouls": "fouls",
-    "goalkeeper_saves": "goalkeeperSaves",
-    "throw_ins": "throwIns",
-    "offsides": "offsides",
-}
+STAT_TARGETS = config.CROCOBET_STAT_TARGETS
+STAT_ORDER = config.STAT_ORDER
+EXCLUDE_TERMS = config.CROCOBET_MARKET_EXCLUDE_TERMS
+STATSHUB_STAT_KEYS = config.STATSHUB_STAT_KEYS
 
 
 
@@ -78,7 +29,7 @@ def fetch_event(event_id: int) -> dict:
         "Accept-Language": "en-US,en;q=0.9",
         "Request-Language": "en",
     }
-    resp = requests.get(url, headers=headers, timeout=30)
+    resp = requests.get(url, headers=headers, timeout=config.HTTP_TIMEOUT_SECONDS)
     resp.raise_for_status()
     return resp.json()
 
@@ -145,9 +96,14 @@ def parse_float(value):
 
 def fetch_games_for_window() -> list:
     today = datetime.now().date()
-    tomorrow = today + timedelta(days=1)
+    end_date = today + timedelta(days=config.WINDOW_END_DAYS)
     start_ts = int(datetime.combine(today, time.min).timestamp())
-    end_ts = int(datetime.combine(tomorrow, time.max).timestamp())
+    end_ts = int(
+        datetime.combine(
+            end_date,
+            time(config.WINDOW_END_HOUR, 0, 0),
+        ).timestamp()
+    )
 
     api_url = f"{BASE_SITE}/api/event/by-date"
     params = {"startOfDay": start_ts, "endOfDay": end_ts}
@@ -156,14 +112,16 @@ def fetch_games_for_window() -> list:
         "Accept": "application/json, text/plain, */*",
         "Referer": BASE_SITE + "/",
     }
-    resp = requests.get(api_url, params=params, headers=headers, timeout=30)
+    resp = requests.get(
+        api_url, params=params, headers=headers, timeout=config.HTTP_TIMEOUT_SECONDS
+    )
     resp.raise_for_status()
     data = resp.json()
     rows = data.get("data")
     return rows if isinstance(rows, list) else []
 
 
-def fetch_team_history(team_id: int, limit: int = 200) -> list:
+def fetch_team_history(team_id: int, limit: int = config.GAME_STATS_HISTORY_LIMIT) -> list:
     api_url = f"{BASE_SITE}/api/team/{team_id}/performance"
     params = {
         "limit": limit,
@@ -175,7 +133,9 @@ def fetch_team_history(team_id: int, limit: int = 200) -> list:
         "Accept": "application/json, text/plain, */*",
         "Referer": BASE_SITE + "/",
     }
-    resp = requests.get(api_url, params=params, headers=headers, timeout=30)
+    resp = requests.get(
+        api_url, params=params, headers=headers, timeout=config.HTTP_TIMEOUT_SECONDS
+    )
     resp.raise_for_status()
     payload = resp.json()
     rows = payload.get("data")
@@ -209,8 +169,8 @@ def build_h2h_matches(
     history_rows: list,
     home_team_id: int,
     away_team_id: int,
-    min_year: int = 2023,
-    max_matches: int = 5,
+    min_year: int = config.H2H_MIN_YEAR,
+    max_matches: int = config.H2H_MAX_MATCHES,
 ) -> list[dict]:
     now_ts = int(datetime.now().timestamp())
     seen_event_ids = set()
@@ -422,8 +382,8 @@ def main():
             history_rows=team_history_cache[home_team_id],
             home_team_id=home_team_id,
             away_team_id=away_team_id,
-            min_year=2023,
-            max_matches=5,
+            min_year=config.H2H_MIN_YEAR,
+            max_matches=config.H2H_MAX_MATCHES,
         )
 
         for label in STAT_ORDER:
