@@ -255,7 +255,11 @@ def save_stats_to_excel(rows, output_path=None):
     summary_df = df.reindex(columns=summary_cols).rename(columns=summary_map)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+    writer_kwargs = {"engine": "openpyxl"}
+    if output_path.exists():
+        writer_kwargs["mode"] = "a"
+        writer_kwargs["if_sheet_exists"] = "replace"
+    with pd.ExcelWriter(output_path, **writer_kwargs) as writer:
         df.to_excel(writer, sheet_name="full", index=False)
         summary_df.to_excel(writer, sheet_name="summary", index=False)
     return output_path

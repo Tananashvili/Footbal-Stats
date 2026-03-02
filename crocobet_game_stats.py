@@ -413,7 +413,11 @@ def main():
     remaining = [c for c in summary_df.columns if c not in preferred]
     summary_df = summary_df.reindex(columns=preferred + remaining)
 
-    with pd.ExcelWriter(EXCEL_PATH, engine="openpyxl") as writer:
+    writer_kwargs = {"engine": "openpyxl"}
+    if EXCEL_PATH.exists():
+        writer_kwargs["mode"] = "a"
+        writer_kwargs["if_sheet_exists"] = "replace"
+    with pd.ExcelWriter(EXCEL_PATH, **writer_kwargs) as writer:
         full_df.to_excel(writer, sheet_name="full", index=False)
         summary_df.to_excel(writer, sheet_name="summary", index=False)
 

@@ -161,7 +161,6 @@ def evaluate(side: str, cb_value: float, actual_total: float | None) -> tuple[st
 
 def main():
     input_path: Path = config.EXCEL_PATH
-    output_path = input_path.with_name(f"{input_path.stem}_results.xlsx")
 
     if not input_path.exists():
         raise SystemExit(f"Input workbook not found: {input_path}")
@@ -184,40 +183,104 @@ def main():
             except (TypeError, ValueError):
                 continue
 
-    ws = wb[config.SHEET_SUMMARY]
+    ws_summary = wb[config.SHEET_SUMMARY]
     by_date_lookup = fetch_events_lookup(config.HTTP_TIMEOUT_SECONDS)
 
-    header_row = 1
-    headers = {}
-    for col in range(1, ws.max_column + 1):
-        name = ws.cell(row=header_row, column=col).value
-        if isinstance(name, str) and name.strip():
-            headers[name.strip()] = col
+    def get_headers(ws) -> dict[str, int]:
+        out = {}
+        for col in range(1, ws.max_column + 1):
+            value = ws.cell(row=1, column=col).value
+            if isinstance(value, str) and value.strip():
+                out[value.strip()] = col
+        return out
 
-    next_col = ws.max_column + 1
-    result_cols = {}
-    for stat in config.STAT_ORDER:
-        avg_col_name = f"average_{stat}"
-        cb_col_name = f"cb_{stat}"
-        if avg_col_name not in headers or cb_col_name not in headers:
-            continue
-
-        result_col_name = f"result_{stat}"
-        if result_col_name in headers:
-            result_cols[stat] = headers[result_col_name]
-        else:
-            ws.cell(row=header_row, column=next_col, value=result_col_name)
-            result_cols[stat] = next_col
+    def ensure_headers(ws, names: list[str]) -> dict[str, int]:
+        headers = get_headers(ws)
+        next_col = ws.max_column + 1 if ws.max_column > 0 else 1
+        if not headers and next_col == 1:
+            next_col = 1
+        for name in names:
+            if name in headers:
+                continue
+            ws.cell(row=1, column=next_col, value=name)
+            headers[name] = next_col
             next_col += 1
+        return headers
+
+    def build_row_index(ws, matchup_col: int | None) -> dict[str, int]:
+        out = {}
+        if matchup_col is None:
+            return out
+        for r in range(2, ws.max_row + 1):
+            key = normalize_matchup(ws.cell(row=r, column=matchup_col).value)
+            if key and key not in out:
+                out[key] = r
+        return out
+
+    summary_headers = get_headers(ws_summary)
+    if "matchup" not in summary_headers:
+        raise SystemExit("'matchup' column not found in summary sheet.")
+
+    results_sheet_name = "results"
+    ws_results = wb[results_sheet_name] if results_sheet_name in wb.sheetnames else wb.create_sheet(results_sheet_name)
+    result_header_names = [
+        f"result_{stat}"
+        for stat in config.STAT_ORDER
+        if f"average_{stat}" in summary_headers and f"cb_{stat}" in summary_headers
+    ]
+    desired_results_headers = list(summary_headers.keys()) + result_header_names
+    results_headers = ensure_headers(ws_results, desired_results_headers)
+    results_row_by_matchup = build_row_index(ws_results, results_headers.get("matchup"))
+    result_cols = {stat: results_headers.get(f"result_{stat}") for stat in config.STAT_ORDER}
+
+    results_table_sheet_name = "results_table"
+    ws_results_table = (
+        wb[results_table_sheet_name]
+        if results_table_sheet_name in wb.sheetnames
+        else wb.create_sheet(results_table_sheet_name)
+    )
+    requested_stats = [
+        ("corners", "corners"),
+        ("cards", "cards"),
+        ("shots_on_target", "shots_on_target"),
+        ("total-shots", "total_shots"),
+        ("fouls", "fouls"),
+        ("saves", "goalkeeper_saves"),
+        ("throw_ins", "throw_ins"),
+        ("offsides", "offsides"),
+    ]
+    desired_table_headers = ["matchup"] + [h for h, _ in requested_stats]
+    table_headers = ensure_headers(ws_results_table, desired_table_headers)
+    table_row_by_matchup = build_row_index(ws_results_table, table_headers.get("matchup"))
+    table_col_by_stat = {stat_label: table_headers[header_name] for header_name, stat_label in requested_stats}
 
     event_cache: dict[int, dict | None] = {}
     history_cache: dict[int, list[dict]] = {}
 
-    for row in range(2, ws.max_row + 1):
-        matchup_col = headers.get("matchup")
-        matchup = ws.cell(row=row, column=matchup_col).value if matchup_col else None
+    summary_matchup_col = summary_headers["matchup"]
+    for row in range(2, ws_summary.max_row + 1):
+        matchup = ws_summary.cell(row=row, column=summary_matchup_col).value
         matchup_key = normalize_matchup(matchup)
+        if not matchup_key:
+            continue
         match_id = matchup_to_match_id.get(matchup_key)
+
+        results_row = results_row_by_matchup.get(matchup_key)
+        if results_row is None:
+            results_row = ws_results.max_row + 1
+            results_row_by_matchup[matchup_key] = results_row
+
+        for col_name, src_col in summary_headers.items():
+            dst_col = results_headers.get(col_name)
+            if dst_col is None:
+                continue
+            ws_results.cell(row=results_row, column=dst_col, value=ws_summary.cell(row=row, column=src_col).value)
+
+        table_row = table_row_by_matchup.get(matchup_key)
+        if table_row is None:
+            table_row = ws_results_table.max_row + 1
+            table_row_by_matchup[matchup_key] = table_row
+        ws_results_table.cell(row=table_row, column=table_headers["matchup"], value=matchup)
 
         event_data = None
         home_team_id = None
@@ -250,22 +313,25 @@ def main():
         for stat in config.STAT_ORDER:
             avg_col_name = f"average_{stat}"
             cb_col_name = f"cb_{stat}"
-            if avg_col_name not in headers or cb_col_name not in headers:
+            if avg_col_name not in summary_headers or cb_col_name not in summary_headers:
                 continue
 
-            avg_col = headers[avg_col_name]
-            cb_col = headers[cb_col_name]
+            avg_col = results_headers.get(avg_col_name)
+            cb_col = results_headers.get(cb_col_name)
             result_col = result_cols.get(stat)
-            if result_col is None:
+            if result_col is None or avg_col is None or cb_col is None:
                 continue
 
-            avg_value = parse_float(ws.cell(row=row, column=avg_col).value)
-            cb_value = parse_float(ws.cell(row=row, column=cb_col).value)
+            avg_value = parse_float(ws_summary.cell(row=row, column=summary_headers[avg_col_name]).value)
+            cb_value = parse_float(ws_summary.cell(row=row, column=summary_headers[cb_col_name]).value)
 
             if avg_value is None or cb_value is None:
-                ws.cell(row=row, column=result_col, value="N/A").fill = YELLOW_FILL
-                ws.cell(row=row, column=avg_col).fill = YELLOW_FILL
-                ws.cell(row=row, column=cb_col).fill = YELLOW_FILL
+                ws_results.cell(row=results_row, column=result_col, value="N/A").fill = YELLOW_FILL
+                ws_results.cell(row=results_row, column=avg_col).fill = YELLOW_FILL
+                ws_results.cell(row=results_row, column=cb_col).fill = YELLOW_FILL
+                out_col = table_col_by_stat.get(stat)
+                if out_col is not None:
+                    ws_results_table.cell(row=table_row, column=out_col, value="N/A").fill = YELLOW_FILL
                 continue
 
             side = infer_side(avg_value, cb_value)
@@ -279,12 +345,21 @@ def main():
                 actual_text = f"{actual_total:g}" if actual_total is not None else "N/A"
                 result_text = f"{side.upper()} {cb_value:g} | actual {actual_text} -> {outcome}"
 
-            ws.cell(row=row, column=result_col, value=result_text).fill = fill
-            ws.cell(row=row, column=avg_col).fill = fill
-            ws.cell(row=row, column=cb_col).fill = fill
+            ws_results.cell(row=results_row, column=result_col, value=result_text).fill = fill
+            ws_results.cell(row=results_row, column=avg_col).fill = fill
+            ws_results.cell(row=results_row, column=cb_col).fill = fill
+            out_col = table_col_by_stat.get(stat)
+            if out_col is not None:
+                if actual_total is None:
+                    ws_results_table.cell(row=table_row, column=out_col, value="N/A").fill = YELLOW_FILL
+                else:
+                    ws_results_table.cell(row=table_row, column=out_col, value=actual_total).fill = fill
 
-    wb.save(output_path)
-    print(f"Saved: {output_path}")
+    try:
+        wb.save(input_path)
+        print(f"Saved: {input_path}")
+    except PermissionError:
+        raise SystemExit(f"Cannot save {input_path}. Close it in Excel and run again.")
 
 
 if __name__ == "__main__":
