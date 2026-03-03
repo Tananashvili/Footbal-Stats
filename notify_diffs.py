@@ -353,6 +353,20 @@ def build_hit_rate_text(
     return side_text, total_hits, total_games
 
 
+def parse_ratio_text(value: str | None) -> tuple[int, int] | None:
+    if not value or "/" not in value:
+        return None
+    left, right = value.split("/", 1)
+    try:
+        hits = int(left.strip())
+        total = int(right.strip())
+    except ValueError:
+        return None
+    if total <= 0 or hits < 0:
+        return None
+    return hits, total
+
+
 def main() -> None:
     if load_dotenv is not None:
         load_dotenv()
@@ -431,6 +445,15 @@ def main() -> None:
             hit_override = total_games == HIT_OVERRIDE_TOTAL and total_hits >= HIT_OVERRIDE_MIN
             pct_ok = pct is not None and threshold <= pct <= 100
             if not pct_ok and not hit_override:
+                continue
+            if total_games <= 0 or (total_hits / total_games) < 0.75:
+                continue
+
+            h2h_ratio = parse_ratio_text(h2h_text_from_sheet)
+            if not h2h_ratio:
+                continue
+            h2h_hits, h2h_games = h2h_ratio
+            if (h2h_hits / h2h_games) < 0.75:
                 continue
 
             side = "over" if float(sh_val) > float(cb_val) else "under"
