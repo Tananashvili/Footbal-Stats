@@ -3,6 +3,7 @@ import sys
 
 
 STEPS = [
+    ("summary_results_fill.py", "Fill summary results workbook sheets"),
     ("statshub.py", "Generate json/stats_averages.xlsx"),
     ("crocobet_events_fetch.py", "Fetch Crocobet fixtures + matches"),
     ("crocobet_game_stats.py", "Fetch Crocobet event stats and update Excel"),
