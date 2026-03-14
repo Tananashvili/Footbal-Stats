@@ -3,6 +3,7 @@ from pathlib import Path
 # Shared paths
 EXCEL_PATH = Path("json") / "stats_averages.xlsx"
 SHEET_SUMMARY = "summary"
+SHEET_TEAM_SUMMARY = "team_summary"
 MATCHES_PATH = Path("json") / "crocobet_event_matches.json"
 DEBUG_MARKETS_PATH = Path("json") / "crocobet_event_markets_debug.json"
 
@@ -90,18 +91,23 @@ CROCOBET_STAT_TARGETS = {
 }
 
 CROCOBET_MARKET_EXCLUDE_TERMS = ["team", "half"]
+CROCOBET_TEAM_MARKET_TEMPLATES = {
+    "corners": "I გუნდის კუთხურები {LINE} ② $",
+    "cards": "I გუნდის ბარათები {LINE} ③ $",
+    "shots_on_target": "I გუნდის კარში დარტყმები {LINE} ① $",
+    "total_shots": "I გუნდის დარტყმები {LINE} ① $",
+    "fouls": "I გუნდის ჯარიმები {LINE} ③ $",
+    "goalkeeper_saves": "I გუნდის სეივები {LINE} ① $",
+    "throw_ins": "I გუნდის აუტები {LINE} ⑩ $",
+    "offsides": "I გუნდის ოფსაიდები {LINE} ⑤ $",
+}
 
 # notify_diffs settings
 DEFAULT_THRESHOLD_PCT = 20.0
-HIT_OVERRIDE_MIN = 16
-HIT_OVERRIDE_TOTAL = 20
+HIT_OVERRIDE_RATE = 0.80
 
-# History windows
-STATSHUB_HISTORY_LIMIT = 10
-NOTIFY_HISTORY_LIMIT = 10
 GAME_STATS_HISTORY_LIMIT = 200
 H2H_MIN_YEAR = 2023
-H2H_MAX_MATCHES = 5
 
 # Team-name normalization for crocobet_events_fetch
 TEAM_ABBREVIATIONS = {

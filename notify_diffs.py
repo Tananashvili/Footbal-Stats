@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 import requests
 import config
+from statshub_api import fetch_team_season_history
 
 try:
     from dotenv import load_dotenv
@@ -17,9 +18,9 @@ except ImportError:
 
 EXCEL_PATH = config.EXCEL_PATH
 SHEET_NAME = config.SHEET_SUMMARY
+TEAM_SHEET_NAME = config.SHEET_TEAM_SUMMARY
 DEFAULT_THRESHOLD_PCT = config.DEFAULT_THRESHOLD_PCT
-HIT_OVERRIDE_MIN = config.HIT_OVERRIDE_MIN
-HIT_OVERRIDE_TOTAL = config.HIT_OVERRIDE_TOTAL
+HIT_OVERRIDE_RATE = config.HIT_OVERRIDE_RATE
 MATCHES_PATH = config.MATCHES_PATH
 EVENT_API_TEMPLATE = config.CROCOBET_EVENT_URL_TEMPLATE
 
@@ -37,6 +38,11 @@ CB_EXCLUDE_PHRASES = {
     for label, spec in config.CROCOBET_STAT_TARGETS.items()
     if spec.get("exclude_phrases")
 }
+TEAM_SIDE_ALIASES = {
+    "1": ("1st team", "first team"),
+    "2": ("2nd team", "second team"),
+}
+TEAM_MARKET_EXCLUDE_TERMS = ("half", "(ot)", "player", "goalkeeper to get red card")
 
 
 def format_number(value: float) -> str:
@@ -150,6 +156,24 @@ def is_valid_cb_market(game_name: str, label: str) -> bool:
     return True
 
 
+def is_valid_team_cb_market(game_name: str, label: str, side: str) -> bool:
+    name = " ".join((game_name or "").lower().split())
+    side_aliases = TEAM_SIDE_ALIASES.get(side)
+    if not side_aliases:
+        return False
+    if not any(alias in name for alias in side_aliases):
+        return False
+    if any(term in name for term in TEAM_MARKET_EXCLUDE_TERMS):
+        return False
+    phrases = CB_MARKET_PHRASES.get(label, [])
+    if phrases and not any(phrase in name for phrase in phrases):
+        return False
+    for phrase in CB_EXCLUDE_PHRASES.get(label, []):
+        if phrase in name:
+            return False
+    return True
+
+
 def find_under_over(outcomes: list[dict]) -> tuple[dict | None, dict | None]:
     under = None
     over = None
@@ -177,6 +201,39 @@ def get_cb_side_odd_for_line(
             continue
         game_name = str(game.get("gameName") or "")
         if not is_valid_cb_market(game_name, label):
+            continue
+        argument = parse_float(game.get("argument"))
+        if argument is None:
+            continue
+        under, over = find_under_over(game.get("outcomes", []))
+        if not under or not over:
+            continue
+        odd = parse_odds((over if side == "over" else under).get("outcomeOdds"))
+        if odd is None:
+            continue
+        delta = abs(argument - cb_line)
+        if best_delta is None or delta < best_delta:
+            best_delta = delta
+            best_odd = odd
+    if best_delta is None:
+        return None
+    return best_odd
+
+
+def get_team_cb_side_odd_for_line(
+    event_data: dict | None,
+    label: str,
+    cb_line: float,
+    side: str,
+    team_side: str,
+) -> float | None:
+    best_odd = None
+    best_delta = None
+    for game in list_event_games(event_data):
+        if not isinstance(game, dict):
+            continue
+        game_name = str(game.get("gameName") or "")
+        if not is_valid_team_cb_market(game_name, label, team_side):
             continue
         argument = parse_float(game.get("argument"))
         if argument is None:
@@ -226,6 +283,7 @@ def build_matchup_context(games: list[dict]) -> dict[str, dict]:
     ctx = {}
     for game in games:
         try:
+            events = game["events"]
             home = game["homeTeam"]
             away = game["awayTeam"]
             tournaments = game["tournaments"]
@@ -239,34 +297,11 @@ def build_matchup_context(games: list[dict]) -> dict[str, dict]:
             "home_team_id": home.get("id"),
             "away_team_id": away.get("id"),
             "tournament_id": tournaments.get("uniqueTournamentId"),
+            "season_id": events.get("seasonId"),
             "home_name": home.get("name"),
             "away_name": away.get("name"),
         }
     return ctx
-
-
-def fetch_team_history(team_id: int, tournament_id: int) -> dict | None:
-    url = f"{BASE_SITE}/api/team/{team_id}/performance?"
-    params = {
-        "tournamentId": tournament_id,
-        "limit": config.NOTIFY_HISTORY_LIMIT,
-        "location": "all",
-        "eventHalf": "ALL",
-    }
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json, text/plain, */*",
-        "Referer": BASE_SITE + "/",
-    }
-    try:
-        resp = requests.get(
-            url, params=params, headers=headers, timeout=config.HTTP_TIMEOUT_SECONDS
-        )
-        resp.raise_for_status()
-    except requests.RequestException:
-        return None
-    data = resp.json()
-    return data if isinstance(data, dict) else None
 
 
 def parse_float(value) -> float | None:
@@ -316,12 +351,41 @@ def count_hits(history_data: dict | None, stat_key: str, side: str, line_value: 
     return hits, total
 
 
+def count_team_hits(
+    history_data: dict | None,
+    stat_key: str,
+    side: str,
+    line_value: float,
+) -> tuple[int, int]:
+    if not history_data:
+        return 0, 0
+    matches = history_data.get("data", [])
+    if not isinstance(matches, list):
+        return 0, 0
+
+    hits = 0
+    total = 0
+    for match in matches:
+        stats = match.get("statistics") if isinstance(match, dict) else None
+        if not isinstance(stats, dict):
+            continue
+        team_value = parse_float(stats.get(stat_key))
+        if team_value is None:
+            continue
+        total += 1
+        if side == "over" and team_value > line_value:
+            hits += 1
+        elif side == "under" and team_value < line_value:
+            hits += 1
+    return hits, total
+
+
 def build_hit_rate_text(
     matchup_ctx: dict | None,
     label: str,
     sh_value: float,
     cb_line: float,
-    history_cache: dict[tuple[int, int], dict | None],
+    history_cache: dict[tuple[int, int, int | None], dict | None],
 ) -> tuple[str, int, int] | None:
     stat_key = STATSHUB_KEY_MAP.get(label)
     if not matchup_ctx or not stat_key:
@@ -330,6 +394,7 @@ def build_hit_rate_text(
     home_team_id = matchup_ctx.get("home_team_id")
     away_team_id = matchup_ctx.get("away_team_id")
     tournament_id = matchup_ctx.get("tournament_id")
+    season_id = matchup_ctx.get("season_id")
     if home_team_id is None or away_team_id is None or tournament_id is None:
         return None
 
@@ -337,12 +402,22 @@ def build_hit_rate_text(
     if side is None:
         return None
 
-    home_cache_key = (int(home_team_id), int(tournament_id))
-    away_cache_key = (int(away_team_id), int(tournament_id))
+    home_cache_key = (int(home_team_id), int(tournament_id), int(season_id) if season_id is not None else None)
+    away_cache_key = (int(away_team_id), int(tournament_id), int(season_id) if season_id is not None else None)
     if home_cache_key not in history_cache:
-        history_cache[home_cache_key] = fetch_team_history(home_cache_key[0], home_cache_key[1])
+        history_cache[home_cache_key] = fetch_team_season_history(
+            team_id=home_cache_key[0],
+            unique_tournament_id=home_cache_key[1],
+            season_id=home_cache_key[2],
+            referer=BASE_SITE + "/",
+        )
     if away_cache_key not in history_cache:
-        history_cache[away_cache_key] = fetch_team_history(away_cache_key[0], away_cache_key[1])
+        history_cache[away_cache_key] = fetch_team_season_history(
+            team_id=away_cache_key[0],
+            unique_tournament_id=away_cache_key[1],
+            season_id=away_cache_key[2],
+            referer=BASE_SITE + "/",
+        )
 
     home_hits, home_total = count_hits(history_cache.get(home_cache_key), stat_key, side, cb_line)
     away_hits, away_total = count_hits(history_cache.get(away_cache_key), stat_key, side, cb_line)
@@ -351,6 +426,42 @@ def build_hit_rate_text(
 
     side_text = "Over" if side == "over" else "Under"
     return side_text, total_hits, total_games
+
+
+def build_team_hit_rate_text(
+    matchup_ctx: dict | None,
+    label: str,
+    sh_value: float,
+    cb_line: float,
+    history_cache: dict[tuple[int, int, int | None], dict | None],
+    team_side: str,
+) -> tuple[str, int, int] | None:
+    stat_key = STATSHUB_KEY_MAP.get(label)
+    if not matchup_ctx or not stat_key:
+        return None
+
+    tournament_id = matchup_ctx.get("tournament_id")
+    season_id = matchup_ctx.get("season_id")
+    team_id = matchup_ctx.get("home_team_id") if team_side == "1" else matchup_ctx.get("away_team_id")
+    if team_id is None or tournament_id is None:
+        return None
+
+    side = infer_bet_side(sh_value, cb_line)
+    if side is None:
+        return None
+
+    cache_key = (int(team_id), int(tournament_id), int(season_id) if season_id is not None else None)
+    if cache_key not in history_cache:
+        history_cache[cache_key] = fetch_team_season_history(
+            team_id=cache_key[0],
+            unique_tournament_id=cache_key[1],
+            season_id=cache_key[2],
+            referer=BASE_SITE + "/",
+        )
+
+    hits, total_games = count_team_hits(history_cache.get(cache_key), stat_key, side, cb_line)
+    side_text = "Over" if side == "over" else "Under"
+    return side_text, hits, total_games
 
 
 def parse_ratio_text(value: str | None) -> tuple[int, int] | None:
@@ -386,15 +497,22 @@ def main() -> None:
         threshold = DEFAULT_THRESHOLD_PCT
 
     df = pd.read_excel(EXCEL_PATH, sheet_name=SHEET_NAME)
+    team_df = pd.read_excel(EXCEL_PATH, sheet_name=TEAM_SHEET_NAME)
     if df.empty:
         return
+    team_rows_by_matchup = {}
+    if not team_df.empty and "matchup" in team_df.columns:
+        for _, team_row in team_df.iterrows():
+            matchup = team_row.get("matchup")
+            if isinstance(matchup, str) and matchup.strip():
+                team_rows_by_matchup.setdefault(normalize(matchup), team_row)
 
     matchup_context = {}
     try:
         matchup_context = build_matchup_context(fetch_games_today())
     except requests.RequestException:
         matchup_context = {}
-    history_cache: dict[tuple[int, int], dict | None] = {}
+    history_cache: dict[tuple[int, int, int | None], dict | None] = {}
     event_id_map = build_event_id_map(parse_json_file(MATCHES_PATH))
     event_cache: dict[int, dict | None] = {}
 
@@ -442,7 +560,7 @@ def main() -> None:
             if hit_data:
                 _, total_hits, total_games = hit_data
 
-            hit_override = total_games == HIT_OVERRIDE_TOTAL and total_hits >= HIT_OVERRIDE_MIN
+            hit_override = total_games > 0 and (total_hits / total_games) >= HIT_OVERRIDE_RATE
             pct_ok = pct is not None and threshold <= pct <= 100
             if not pct_ok and not hit_override:
                 continue
@@ -472,6 +590,82 @@ def main() -> None:
             h2h_part = h2h_text_from_sheet or "n/a"
             part = f"{odds_part} | {value_part} | {hit_part} | H2H {h2h_part}"
             parts.append(part)
+
+        team_row = team_rows_by_matchup.get(matchup_key)
+        if team_row is not None:
+            home_name = ctx.get("home_name") if ctx else row.get("home_team_shortname")
+            away_name = ctx.get("away_name") if ctx else row.get("away_team_shortname")
+            team_names = {
+                "1": home_name or "Home team",
+                "2": away_name or "Away team",
+            }
+            for side_key in ("1", "2"):
+                team_name = team_names[side_key]
+                for label in STAT_ORDER:
+                    sh_col = f"average_{label}_{side_key}"
+                    cb_col = f"cb_{label}_{side_key}"
+                    h2h_col = f"h2h_{label}_{side_key}"
+                    if sh_col not in team_df.columns or cb_col not in team_df.columns:
+                        continue
+                    sh_val = team_row.get(sh_col)
+                    cb_val = team_row.get(cb_col)
+                    if pd.isna(sh_val) or pd.isna(cb_val):
+                        continue
+
+                    h2h_val = team_row.get(h2h_col) if h2h_col in team_df.columns else None
+                    h2h_text_from_sheet = None
+                    if h2h_val is not None and not pd.isna(h2h_val):
+                        h2h_text_from_sheet = str(h2h_val).strip() or None
+
+                    pct = diff_percent(sh_val, cb_val)
+                    stat_label = STAT_LABELS.get(label, label)
+                    if pct is not None and pct > 100:
+                        continue
+
+                    hit_data = build_team_hit_rate_text(
+                        matchup_ctx=ctx,
+                        label=label,
+                        sh_value=float(sh_val),
+                        cb_line=float(cb_val),
+                        history_cache=history_cache,
+                        team_side=side_key,
+                    )
+                    total_hits = 0
+                    total_games = 0
+                    if hit_data:
+                        _, total_hits, total_games = hit_data
+
+                    hit_override = total_games > 0 and (total_hits / total_games) >= HIT_OVERRIDE_RATE
+                    pct_ok = pct is not None and threshold <= pct <= 100
+                    if not pct_ok and not hit_override:
+                        continue
+                    if total_games <= 0 or (total_hits / total_games) < 0.75:
+                        continue
+
+                    h2h_ratio = parse_ratio_text(h2h_text_from_sheet)
+                    if not h2h_ratio:
+                        continue
+                    h2h_hits, h2h_games = h2h_ratio
+                    if (h2h_hits / h2h_games) < 0.75:
+                        continue
+
+                    side = "over" if float(sh_val) > float(cb_val) else "under"
+                    cb_odd = get_team_cb_side_odd_for_line(
+                        event_data=event_data,
+                        label=label,
+                        cb_line=float(cb_val),
+                        side=side,
+                        team_side=side_key,
+                    )
+                    odd_text = format_number(cb_odd) if cb_odd is not None else "n/a"
+                    odds_part = f"{team_name} {side} {format_number(cb_val)} {stat_label.lower()} - {odd_text}"
+                    value_part = f"{pct:.0f}%" if pct is not None else "n/a"
+                    hit_part = "n/a"
+                    if total_games > 0:
+                        hit_part = f"{total_hits}/{total_games}"
+                    h2h_part = h2h_text_from_sheet or "n/a"
+                    part = f"{odds_part} | {value_part} | {hit_part} | H2H {h2h_part}"
+                    parts.append(part)
 
         if not parts:
             continue

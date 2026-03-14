@@ -5,7 +5,7 @@ Python pipeline that compares football match stat averages from **Statshub** wit
 ## What this project does
 
 1. Pulls upcoming matches from Statshub (configured leagues/time window).
-2. Builds per-match stat averages from recent team history.
+2. Builds per-match stat averages from current-season team history in the same tournament.
 3. Fetches Crocobet events and matches them to Statshub fixtures (fuzzy team-name matching).
 4. Adds Crocobet lines + H2H ratio columns into the Excel summary.
 5. Sends Telegram notifications for value candidates (threshold-based + hit-rate override).
@@ -95,8 +95,8 @@ Centralized in `config.py`:
 - target Statshub tournaments (`STATSHUB_TARGET_TOURNAMENTS`)
 - Crocobet league IDs (`CROCOBET_LEAGUE_IDS`)
 - tracked stats (`STAT_ORDER`, labels and mappings)
-- notify thresholds (`DEFAULT_THRESHOLD_PCT`, hit overrides)
-- history limits and H2H rules
+- notify thresholds (`DEFAULT_THRESHOLD_PCT`, hit override rate)
+- H2H rules
 - team name normalization dictionaries
 
 Adjust these values in `config.py` to fit your workflow.

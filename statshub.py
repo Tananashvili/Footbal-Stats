@@ -1,11 +1,10 @@
 import json
 import os
-import time as _time
 from pathlib import Path
 import requests
 from datetime import datetime, time, timedelta
-from urllib.parse import urljoin
 import config
+from statshub_api import fetch_team_season_history
 
 BASE_SITE = config.BASE_SITE
 
@@ -61,10 +60,12 @@ def get_games_data(startOfDay, endOfDay):
 
         tournament_id = game['tournaments']['uniqueTournamentId']
         toruname_name = game['tournaments']['name']
+        season_id = game['events'].get('seasonId')
 
         game_data = {'match_id': match_id, 'slug': slug, 'game_url': game_url, 'home_team_id': home_team_id, 'home_team_name': home_team_name,
                      'home_team_shortname': home_team_shortname, 'away_team_id': away_team_id, 'away_team_name': away_team_name,
-                     'away_team_shortname': away_team_shortname, 'tournament_id': tournament_id, 'toruname_name': toruname_name}
+                     'away_team_shortname': away_team_shortname, 'tournament_id': tournament_id, 'toruname_name': toruname_name,
+                     'season_id': season_id}
         
         if game['events']['status'] == "notstarted" and toruname_name in TOP_5_LEAGUES:
             game_data_list.append(game_data)
@@ -73,36 +74,12 @@ def get_games_data(startOfDay, endOfDay):
 
 
 def get_games_history(game_data, team_id, retries=3, backoff_seconds=2):
-    game_limit = config.STATSHUB_HISTORY_LIMIT
-    api_url = f"https://www.statshub.com/api/team/{team_id}/performance?"
-
-    params = {
-        "tournamentId": game_data['tournament_id'],
-        "limit": game_limit,
-        'location': 'all',
-        'eventHalf': 'ALL'
-    }
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json, text/plain, */*",
-        "Referer": game_data['game_url'],
-    }
-
-    # ---- Request ----
-    last_exc = None
-    for attempt in range(retries):
-        try:
-            response = requests.get(
-                api_url, params=params, headers=headers, timeout=config.HTTP_TIMEOUT_SECONDS
-            )
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as exc:
-            last_exc = exc
-            if attempt < retries - 1:
-                _time.sleep(backoff_seconds * (attempt + 1))
-    return None
+    return fetch_team_season_history(
+        team_id=team_id,
+        unique_tournament_id=game_data["tournament_id"],
+        season_id=game_data.get("season_id"),
+        referer=game_data["game_url"],
+    )
 
 
 def save_games_history(game_data, team_id, output_path="games_history.json"):
@@ -197,11 +174,11 @@ def build_game_row(game_data, home_history, away_history):
         away_avg = calculate_stat_averages(away_history, stat_key)
         if not home_avg or not away_avg:
             continue
-        avg_home = home_avg["avg_per_match"]
-        avg_away = away_avg["avg_per_match"]
-        row[f"average_{label}"] = (avg_home + avg_away) / 2
-        row[f"average_{label}_1"] = avg_home
-        row[f"average_{label}_2"] = avg_away
+        avg_home_total = home_avg["avg_per_match"]
+        avg_away_total = away_avg["avg_per_match"]
+        row[f"average_{label}"] = (avg_home_total + avg_away_total) / 2
+        row[f"average_{label}_1"] = home_avg["avg_for_team"]
+        row[f"average_{label}_2"] = away_avg["avg_for_team"]
 
     return row
 
@@ -222,8 +199,11 @@ def save_stats_to_excel(rows, output_path=None):
         return None
 
     df = pd.DataFrame(rows)
+    avg_cols = [col for col in df.columns if col.startswith("average_")]
+    if avg_cols:
+        df.loc[:, avg_cols] = df.loc[:, avg_cols].round(1)
 
-    # Second sheet: matchup, tournament, shortnames, and avg_per_match for each stat.
+    # Second sheet: matchup, tournament, shortnames, and total-match averages only.
     stat_labels = [
         "corners",
         "cards",
@@ -247,10 +227,9 @@ def save_stats_to_excel(rows, output_path=None):
         "away_team_shortname": "away_team_shortname",
     }
     for label in stat_labels:
-        for suffix in ("", "_1", "_2"):
-            src = f"average_{label}{suffix}"
-            summary_cols.append(src)
-            summary_map[src] = src
+        src = f"average_{label}"
+        summary_cols.append(src)
+        summary_map[src] = src
 
     summary_df = df.reindex(columns=summary_cols).rename(columns=summary_map)
 

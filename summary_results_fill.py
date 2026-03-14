@@ -14,6 +14,7 @@ import config
 GREEN_FILL = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
 RED_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
 YELLOW_FILL = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+TEAM_SUMMARY_SHEET = config.SHEET_TEAM_SUMMARY
 
 
 def parse_float(value):
@@ -134,7 +135,7 @@ def find_match_row(history_rows: list[dict], event_id: int) -> dict | None:
     return None
 
 
-def compute_actual_total(match_row: dict | None, stat_label: str) -> float | None:
+def compute_actual_stat_value(match_row: dict | None, stat_label: str, side: str = "total") -> float | None:
     if not match_row:
         return None
     stat_key = config.STATSHUB_STAT_KEYS.get(stat_label)
@@ -144,6 +145,10 @@ def compute_actual_total(match_row: dict | None, stat_label: str) -> float | Non
     opp_stats = match_row.get("opponentStatistics") or {}
     a = parse_float(stats.get(stat_key))
     b = parse_float(opp_stats.get(stat_key))
+    if side == "1":
+        return a
+    if side == "2":
+        return b
     if a is None or b is None:
         return None
     return a + b
@@ -163,7 +168,8 @@ def main():
     input_path: Path = config.EXCEL_PATH
 
     if not input_path.exists():
-        raise SystemExit(f"Input workbook not found: {input_path}")
+        print(f"Skipping summary_results_fill.py: input workbook not found: {input_path}")
+        return
 
     wb = load_workbook(input_path)
     if config.SHEET_SUMMARY not in wb.sheetnames:
@@ -171,6 +177,12 @@ def main():
 
     # matchup -> match_id from full sheet
     full_df = pd.read_excel(input_path, sheet_name="full")
+    summary_df = pd.read_excel(input_path, sheet_name=config.SHEET_SUMMARY)
+    team_summary_df = (
+        pd.read_excel(input_path, sheet_name=TEAM_SUMMARY_SHEET)
+        if TEAM_SUMMARY_SHEET in wb.sheetnames
+        else pd.DataFrame()
+    )
     matchup_to_match_id = {}
     if "matchup" in full_df.columns and "match_id" in full_df.columns:
         for _, item in full_df.iterrows():
@@ -182,8 +194,8 @@ def main():
                 matchup_to_match_id[key] = int(match_id)
             except (TypeError, ValueError):
                 continue
-
     ws_summary = wb[config.SHEET_SUMMARY]
+    ws_team_summary = wb[TEAM_SUMMARY_SHEET] if TEAM_SUMMARY_SHEET in wb.sheetnames else None
     by_date_lookup = fetch_events_lookup(config.HTTP_TIMEOUT_SECONDS)
 
     def get_headers(ws) -> dict[str, int]:
@@ -218,6 +230,7 @@ def main():
         return out
 
     summary_headers = get_headers(ws_summary)
+    team_summary_headers = get_headers(ws_team_summary) if ws_team_summary is not None else {}
     if "matchup" not in summary_headers:
         raise SystemExit("'matchup' column not found in summary sheet.")
 
@@ -228,10 +241,25 @@ def main():
         for stat in config.STAT_ORDER
         if f"average_{stat}" in summary_headers and f"cb_{stat}" in summary_headers
     ]
-    desired_results_headers = list(summary_headers.keys()) + result_header_names
+    team_result_header_names = [
+        f"result_{stat}_{side}"
+        for stat in config.STAT_ORDER
+        for side in ("1", "2")
+        if f"average_{stat}_{side}" in team_summary_headers and f"cb_{stat}_{side}" in team_summary_headers
+    ]
+    merged_header_names = list(summary_headers.keys())
+    for name in team_summary_headers.keys():
+        if name not in merged_header_names:
+            merged_header_names.append(name)
+    desired_results_headers = merged_header_names + result_header_names + team_result_header_names
     results_headers = ensure_headers(ws_results, desired_results_headers)
     results_row_by_matchup = build_row_index(ws_results, results_headers.get("matchup"))
     result_cols = {stat: results_headers.get(f"result_{stat}") for stat in config.STAT_ORDER}
+    team_result_cols = {
+        (stat, side): results_headers.get(f"result_{stat}_{side}")
+        for stat in config.STAT_ORDER
+        for side in ("1", "2")
+    }
 
     results_table_sheet_name = "results_table"
     ws_results_table = (
@@ -249,21 +277,35 @@ def main():
         ("throw_ins", "throw_ins"),
         ("offsides", "offsides"),
     ]
-    desired_table_headers = ["matchup"] + [h for h, _ in requested_stats]
+    desired_table_headers = ["matchup"] + [h for h, _ in requested_stats] + [f"{h}_1" for h, _ in requested_stats] + [f"{h}_2" for h, _ in requested_stats]
     table_headers = ensure_headers(ws_results_table, desired_table_headers)
     table_row_by_matchup = build_row_index(ws_results_table, table_headers.get("matchup"))
     table_col_by_stat = {stat_label: table_headers[header_name] for header_name, stat_label in requested_stats}
+    team_table_col_by_stat = {
+        (stat_label, side): table_headers[f"{header_name}_{side}"]
+        for header_name, stat_label in requested_stats
+        for side in ("1", "2")
+    }
 
     event_cache: dict[int, dict | None] = {}
     history_cache: dict[int, list[dict]] = {}
 
     summary_matchup_col = summary_headers["matchup"]
+    team_summary_row_by_matchup = {}
+    if ws_team_summary is not None and "matchup" in team_summary_headers:
+        team_matchup_col = team_summary_headers["matchup"]
+        for row in range(2, ws_team_summary.max_row + 1):
+            key = normalize_matchup(ws_team_summary.cell(row=row, column=team_matchup_col).value)
+            if key and key not in team_summary_row_by_matchup:
+                team_summary_row_by_matchup[key] = row
+
     for row in range(2, ws_summary.max_row + 1):
         matchup = ws_summary.cell(row=row, column=summary_matchup_col).value
         matchup_key = normalize_matchup(matchup)
         if not matchup_key:
             continue
         match_id = matchup_to_match_id.get(matchup_key)
+        team_row = team_summary_row_by_matchup.get(matchup_key)
 
         results_row = results_row_by_matchup.get(matchup_key)
         if results_row is None:
@@ -275,6 +317,12 @@ def main():
             if dst_col is None:
                 continue
             ws_results.cell(row=results_row, column=dst_col, value=ws_summary.cell(row=row, column=src_col).value)
+        if ws_team_summary is not None and team_row is not None:
+            for col_name, src_col in team_summary_headers.items():
+                dst_col = results_headers.get(col_name)
+                if dst_col is None:
+                    continue
+                ws_results.cell(row=results_row, column=dst_col, value=ws_team_summary.cell(row=team_row, column=src_col).value)
 
         table_row = table_row_by_matchup.get(matchup_key)
         if table_row is None:
@@ -335,7 +383,7 @@ def main():
                 continue
 
             side = infer_side(avg_value, cb_value)
-            actual_total = compute_actual_total(match_row, stat)
+            actual_total = compute_actual_stat_value(match_row, stat, "total")
 
             if event_status and event_status != "finished":
                 result_text = f"{side.upper()} {cb_value:g} | not finished"
@@ -354,6 +402,55 @@ def main():
                     ws_results_table.cell(row=table_row, column=out_col, value="N/A").fill = YELLOW_FILL
                 else:
                     ws_results_table.cell(row=table_row, column=out_col, value=actual_total).fill = fill
+
+        if ws_team_summary is None or team_row is None:
+            continue
+
+        for stat in config.STAT_ORDER:
+            for side in ("1", "2"):
+                avg_col_name = f"average_{stat}_{side}"
+                cb_col_name = f"cb_{stat}_{side}"
+                if avg_col_name not in team_summary_headers or cb_col_name not in team_summary_headers:
+                    continue
+
+                avg_col = results_headers.get(avg_col_name)
+                cb_col = results_headers.get(cb_col_name)
+                result_col = team_result_cols.get((stat, side))
+                if result_col is None or avg_col is None or cb_col is None:
+                    continue
+
+                avg_value = parse_float(ws_team_summary.cell(row=team_row, column=team_summary_headers[avg_col_name]).value)
+                cb_value = parse_float(ws_team_summary.cell(row=team_row, column=team_summary_headers[cb_col_name]).value)
+
+                if avg_value is None or cb_value is None:
+                    ws_results.cell(row=results_row, column=result_col, value="N/A").fill = YELLOW_FILL
+                    ws_results.cell(row=results_row, column=avg_col).fill = YELLOW_FILL
+                    ws_results.cell(row=results_row, column=cb_col).fill = YELLOW_FILL
+                    out_col = team_table_col_by_stat.get((stat, side))
+                    if out_col is not None:
+                        ws_results_table.cell(row=table_row, column=out_col, value="N/A").fill = YELLOW_FILL
+                    continue
+
+                side_text = infer_side(avg_value, cb_value)
+                actual_value = compute_actual_stat_value(match_row, stat, side)
+
+                if event_status and event_status != "finished":
+                    result_text = f"{side_text.upper()} {cb_value:g} | not finished"
+                    fill = YELLOW_FILL
+                else:
+                    outcome, fill = evaluate(side_text, cb_value, actual_value)
+                    actual_text = f"{actual_value:g}" if actual_value is not None else "N/A"
+                    result_text = f"{side_text.upper()} {cb_value:g} | actual {actual_text} -> {outcome}"
+
+                ws_results.cell(row=results_row, column=result_col, value=result_text).fill = fill
+                ws_results.cell(row=results_row, column=avg_col).fill = fill
+                ws_results.cell(row=results_row, column=cb_col).fill = fill
+                out_col = team_table_col_by_stat.get((stat, side))
+                if out_col is not None:
+                    if actual_value is None:
+                        ws_results_table.cell(row=table_row, column=out_col, value="N/A").fill = YELLOW_FILL
+                    else:
+                        ws_results_table.cell(row=table_row, column=out_col, value=actual_value).fill = fill
 
     try:
         wb.save(input_path)
